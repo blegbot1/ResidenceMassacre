@@ -30,12 +30,24 @@ G.RM_FB = G.RM_FB or true          -- fullbright
 G.RM_Bright = G.RM_Bright or 3     -- яркость 0..10
 G.RM_NoFog = G.RM_NoFog or true    -- без тумана/теней
 G.RM_Speed = G.RM_Speed or 50      -- скорость 0..300
-G.RM_SpeedOn = G.RM_SpeedOn or true
+G.RM_SpeedOn = G.RM_SpeedOn or false -- по умолчанию ВЫКЛ: скорость чаще всего триггерит кик
+G.RM_Poll = G.RM_Poll or 1        -- как часто проверять/возвращать значения (сек)
 
 -- ---------------- применение ----------------
+-- пишем свойство ТОЛЬКО если оно реально отличается.
+-- постоянные записи Lighting/WalkSpeed каждый кадр -> desync -> кик (Error 267)
 local function setProp(obj, name, value)
     pcall(function()
-        obj[name] = value
+        local cur = obj[name]
+        local same
+        if typeof(value) == "number" then
+            same = (typeof(cur) == "number") and math.abs(cur - value) <= 0.01
+        else
+            same = cur == value
+        end
+        if not same then
+            obj[name] = value
+        end
     end)
 end
 
@@ -88,7 +100,7 @@ gui.Parent = LP:WaitForChild("PlayerGui")
 
 local panel = Instance.new("Frame")
 panel.Name = "Panel"
-panel.Size = UDim2.fromOffset(250, 208)
+panel.Size = UDim2.fromOffset(250, 248)
 panel.Position = UDim2.fromOffset(20, 20)
 panel.BackgroundColor3 = BG
 panel.BorderSizePixel = 0
@@ -228,6 +240,7 @@ end
 
 mkSlider(130, "Brightness", "RM_Bright", 0, 10, 0.5, "")
 mkSlider(170, "Speed", "RM_Speed", 0, 300, 1, " st")
+mkSlider(210, "Check every", "RM_Poll", 0.1, 5, 0.1, " s")
 
 -- перетаскивание окна
 UIS.InputBegan:Connect(function(input, gp)
@@ -258,12 +271,15 @@ UIS.InputBegan:Connect(function(input, gp)
 end)
 
 -- ---------------- главный цикл ----------------
+-- Опрос по умолчанию раз в секунду: реже = меньше нагрузки и риска кика.
+-- setProp сам пишет только при реальном отличии, так что в покое нагрузка нулевая.
 task.spawn(function()
     while true do
-        -- форсим каждый кадр: игры часто сбрасывают свет и скорость
         applyLight()
         applySpeed()
-        task.wait(0.05)
+        local poll = G.RM_Poll or 1
+        if poll < 0.1 then poll = 0.1 end
+        task.wait(poll)
     end
 end)
 
