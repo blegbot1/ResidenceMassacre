@@ -4,10 +4,12 @@
 --  Только клиентские свойства: Lighting + Humanoid.WalkSpeed.
 --  Никакого вмешательства в сервер и обхода защиты.
 --
---  Repo: https://github.com/blegbot1/ResidenceMassacre
+--  Repo:   https://github.com/blegbot1/ResidenceMassacre
 --  Loader: raw.../refs/heads/main/ResidenceMassacre.lua
+--  Запуск: loadstring(game:HttpGet("https://raw.githubusercontent.com/blegbot1/ResidenceMassacre/refs/heads/main/ResidenceMassacre.lua",true))()
 --
---  Респавн подхватывается сам через CharacterAdded.
+--  Ввод сделан через UserInputService + ручной хит-тест,
+--  потому что UI игры перехватывает клики по GuiObject'ам.
 -- ============================================================
 
 -- Place ID Residence Massacre.
@@ -15,7 +17,6 @@
 local ONLY_PLACE_ID = nil
 
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
 local Lighting = game:GetService("Lighting")
 local LP = Players.LocalPlayer
@@ -26,16 +27,16 @@ if ONLY_PLACE_ID and game.PlaceId ~= ONLY_PLACE_ID then
 end
 
 local G = getgenv()
-G.RM_FB = G.RM_FB or true          -- fullbright
-G.RM_Bright = G.RM_Bright or 3     -- яркость 0..10
-G.RM_NoFog = G.RM_NoFog or true    -- без тумана/теней
-G.RM_Speed = G.RM_Speed or 50      -- скорость 0..300
-G.RM_SpeedOn = G.RM_SpeedOn or false -- по умолчанию ВЫКЛ: скорость чаще всего триггерит кик
-G.RM_Poll = G.RM_Poll or 1        -- как часто проверять/возвращать значения (сек)
+G.RM_FB = G.RM_FB or true            -- fullbright
+G.RM_Bright = G.RM_Bright or 3       -- яркость 0..10
+G.RM_NoFog = G.RM_NoFog or true      -- без тумана/теней
+G.RM_SpeedOn = G.RM_SpeedOn or false -- ВЫКЛ по умолчанию: скорость чаще всего триггерит кик
+G.RM_Speed = G.RM_Speed or 50        -- скорость 0..300
+G.RM_Poll = G.RM_Poll or 1           -- как часто возвращать значения (сек)
 
--- ---------------- применение ----------------
+-- ================= применение =================
 -- пишем свойство ТОЛЬКО если оно реально отличается.
--- постоянные записи Lighting/WalkSpeed каждый кадр -> desync -> кик (Error 267)
+-- постоянные записи -> desync -> кик (Error 267)
 local function setProp(obj, name, value)
     pcall(function()
         local cur = obj[name]
@@ -80,30 +81,33 @@ local function applySpeed()
     end
 end
 
--- ловим респавн
 LP.CharacterAdded:Connect(function()
     task.wait(0.3)
     applySpeed()
 end)
 
--- ---------------- интерфейс ----------------
+-- ================= интерфейс =================
 local BG = Color3.fromRGB(18, 14, 28)
-local EL = Color3.fromRGB(24, 18, 38)
+local EL = Color3.fromRGB(26, 20, 40)
+local HOVER = Color3.fromRGB(38, 28, 58)
 local PURPLE = Color3.fromRGB(150, 90, 235)
+local DIM = Color3.fromRGB(120, 115, 135)
 local TEXT = Color3.fromRGB(235, 230, 245)
 
 local gui = Instance.new("ScreenGui")
 gui.Name = "ResidenceMassacreTool"
 gui.ResetOnSpawn = false
+gui.DisplayOrder = 999          -- поверх игрового UI
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.Parent = LP:WaitForChild("PlayerGui")
 
 local panel = Instance.new("Frame")
 panel.Name = "Panel"
-panel.Size = UDim2.fromOffset(250, 248)
+panel.Size = UDim2.fromOffset(250, 250)
 panel.Position = UDim2.fromOffset(20, 20)
 panel.BackgroundColor3 = BG
 panel.BorderSizePixel = 0
+panel.Active = true
 panel.Parent = gui
 Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
 local stroke = Instance.new("UIStroke", panel)
@@ -111,7 +115,7 @@ stroke.Color = PURPLE
 stroke.Thickness = 1
 stroke.Transparency = 0.4
 
-local function mkLabel(parent, text, size, bold)
+local function mkLabel(parent, text, size)
     local l = Instance.new("TextLabel")
     l.Text = text
     l.Size = size
@@ -119,21 +123,30 @@ local function mkLabel(parent, text, size, bold)
     l.Font = Enum.Font.GothamSemibold
     l.TextColor3 = TEXT
     l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Active = false
     l.Parent = parent
     return l
 end
 
-local title = mkLabel(panel, "RESIDENCE MASSACRE | Fullbright", UDim2.new(1, -20, 0, 24), true)
-title.Position = UDim2.fromOffset(10, 8)
+local title = mkLabel(panel, "RESIDENCE MASSACRE | Fullbright", UDim2.new(1, -20, 0, 24))
+title.Position = UDim2.fromOffset(10, 6)
 title.TextSize = 15
 
+-- всё кликабельное регистрируется тут: {rect(), onClick()}
+local buttons = {}
+local sliders = {}
+local TITLE_H = 26
+
+local function inRect(p, pos, size)
+    return p.X >= pos.X and p.X <= pos.X + size.X and p.Y >= pos.Y and p.Y <= pos.Y + size.Y
+end
+
 local function mkToggle(y, text, flag)
-    local holder = Instance.new("TextButton")
+    local holder = Instance.new("Frame")
     holder.Size = UDim2.new(1, -20, 0, 26)
     holder.Position = UDim2.fromOffset(10, y)
-    holder.BackgroundColor3 = EL
-    holder.Text = ""
-    holder.AutoButtonColor = false
+    holder.BackgroundColor3 = BG
+    holder.BorderSizePixel = 0
     holder.Parent = panel
     Instance.new("UICorner", holder).CornerRadius = UDim.new(0, 6)
 
@@ -149,25 +162,27 @@ local function mkToggle(y, text, flag)
     local function paint()
         local on = G[flag]
         state.Text = on and "ON" or "OFF"
-        state.TextColor3 = on and PURPLE or Color3.fromRGB(120, 115, 135)
+        state.TextColor3 = on and PURPLE or DIM
         holder.BackgroundColor3 = on and EL or BG
     end
 
-    holder.MouseButton1Click:Connect(function()
-        G[flag] = not G[flag]
-        paint()
-        applyLight()
-        applySpeed()
-    end)
+    buttons[#buttons + 1] = {
+        get = function() return holder.AbsolutePosition, holder.AbsoluteSize end,
+        cb = function()
+            G[flag] = not G[flag]
+            paint()
+            applyLight()
+            applySpeed()
+        end,
+        hover = function(on) holder.BackgroundColor3 = on and HOVER or (G[flag] and EL or BG) end,
+    }
     paint()
-    return holder
 end
 
-mkToggle(38, "Fullbright", "RM_FB")
-mkToggle(68, "No fog / shadows", "RM_NoFog")
-mkToggle(98, "Speed hack", "RM_SpeedOn")
+mkToggle(34, "Fullbright", "RM_FB")
+mkToggle(64, "No fog / shadows", "RM_NoFog")
+mkToggle(94, "Speed hack", "RM_SpeedOn")
 
--- слайдеры: brightness + speed
 local function mkSlider(y, text, flag, min, max, step, stepTxt)
     local holder = Instance.new("Frame")
     holder.Size = UDim2.new(1, -20, 0, 34)
@@ -186,9 +201,10 @@ local function mkSlider(y, text, flag, min, max, step, stepTxt)
     val.TextColor3 = PURPLE
 
     local bar = Instance.new("Frame")
-    bar.Size = UDim2.new(1, 0, 0, 8)
+    bar.Size = UDim2.new(1, 0, 0, 10)
     bar.Position = UDim2.fromOffset(0, 20)
     bar.BackgroundColor3 = EL
+    bar.BorderSizePixel = 0
     bar.Parent = holder
     Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
 
@@ -196,6 +212,7 @@ local function mkSlider(y, text, flag, min, max, step, stepTxt)
     fill.Name = "Fill"
     fill.Size = UDim2.fromScale(0, 1)
     fill.BackgroundColor3 = PURPLE
+    fill.BorderSizePixel = 0
     fill.Parent = bar
     Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
 
@@ -205,74 +222,116 @@ local function mkSlider(y, text, flag, min, max, step, stepTxt)
         fill.Size = UDim2.fromScale(math.clamp((v - min) / (max - min), 0, 1), 1)
     end
 
-    local dragging = false
-    bar.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or
-            input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-        end
-    end)
-    UIS.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or
-            input.UserInputType == Enum.UserInputType.Touch then
-            dragging = false
-        end
-    end)
-    UIS.InputChanged:Connect(function(input)
-        if not dragging then return end
-        if input.UserInputType == Enum.UserInputType.MouseMovement or
-            input.UserInputType == Enum.UserInputType.Touch then
-            local pos = input.Position.X
-            local size = bar.AbsoluteSize.X
-            if size <= 0 then return end
-            local frac = math.clamp((pos - bar.AbsolutePosition.X) / size, 0, 1)
-            local v = min + (max - min) * frac
-            v = math.floor(v / step + 0.5) * step
-            G[flag] = v
-            paint()
-            applyLight()
-            applySpeed()
-        end
-    end)
+    local function setFromX(x)
+        local size = bar.AbsoluteSize.X
+        if size <= 0 then return end
+        local frac = math.clamp((x - bar.AbsolutePosition.X) / size, 0, 1)
+        local v = min + (max - min) * frac
+        v = math.floor(v / step + 0.5) * step
+        G[flag] = v
+        paint()
+        applyLight()
+        applySpeed()
+    end
 
+    sliders[#sliders + 1] = {
+        get = function() return bar.AbsolutePosition, bar.AbsoluteSize end,
+        onDown = function(p) setFromX(p.X) end,
+        onMove = function(p) setFromX(p.X) end,
+    }
     paint()
 end
 
-mkSlider(130, "Brightness", "RM_Bright", 0, 10, 0.5, "")
-mkSlider(170, "Speed", "RM_Speed", 0, 300, 1, " st")
-mkSlider(210, "Check every", "RM_Poll", 0.1, 5, 0.1, " s")
+mkSlider(126, "Brightness", "RM_Bright", 0, 10, 0.5, "")
+mkSlider(166, "Speed", "RM_Speed", 0, 300, 1, " st")
+mkSlider(206, "Check every", "RM_Poll", 0.1, 5, 0.1, " s")
 
--- перетаскивание окна
-UIS.InputBegan:Connect(function(input, gp)
-    if gp then return end
-    if input.UserInputType == Enum.UserInputType.MouseButton1 then
-        local p = input.Position
-        local pos = panel.AbsolutePosition
-        local size = panel.AbsoluteSize
-        if p.X >= pos.X and p.X <= pos.X + size.X and p.Y >= pos.Y and p.Y <= pos.Y + 26 then
-            local ox = p.X - pos.X
-            local oy = p.Y - pos.Y
-            local dragging = true
-            local conn
-            conn = UIS.InputChanged:Connect(function(i2)
-                if dragging then
-                    panel.Position = UDim2.new(0, i2.Position.X - ox, 0, i2.Position.Y - oy)
-                end
-            end)
-            UIS.InputEnded:Connect(function()
-                dragging = false
-                if conn then
-                    conn:Disconnect()
-                    conn = nil
-                end
-            end)
+-- ================= ввод (ручной хит-тест) =================
+local draggingPanel = false
+local draggingSlider = nil
+local dragOff = Vector2.new(0, 0)
+local hoverBtn = nil
+
+local function isDown(input)
+    local t = input.UserInputType
+    return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
+end
+
+UIS.InputBegan:Connect(function(input, processed)
+    if processed then return end
+    if not isDown(input) then return end
+    local p = input.Position
+    if not inRect(p, panel.AbsolutePosition, panel.AbsoluteSize) then return end
+
+    -- слайдер?
+    for _, s in ipairs(sliders) do
+        local pos, size = s.get()
+        if inRect(p, pos, size) then
+            draggingSlider = s
+            s.onDown(p)
+            return
+        end
+    end
+
+    -- кнопка?
+    for _, b in ipairs(buttons) do
+        local pos, size = b.get()
+        if inRect(p, pos, size) then
+            b.cb()
+            return
+        end
+    end
+
+    -- иначе тянем окно за шапку
+    if p.Y <= panel.AbsolutePosition.Y + TITLE_H then
+        draggingPanel = true
+        dragOff = Vector2.new(p.X - panel.AbsolutePosition.X, p.Y - panel.AbsolutePosition.Y)
+    end
+end)
+
+UIS.InputMoved:Connect(function(input)
+    local p = input.Position
+    if draggingSlider then
+        draggingSlider.onMove(p)
+        return
+    end
+    if draggingPanel then
+        panel.Position = UDim2.new(0, p.X - dragOff.X, 0, p.Y - dragOff.Y)
+        return
+    end
+    -- подсветка кнопки под курсором
+    local inside = inRect(p, panel.AbsolutePosition, panel.AbsoluteSize)
+    local newHover = nil
+    if inside then
+        for i, b in ipairs(buttons) do
+            local pos, size = b.get()
+            if inRect(p, pos, size) then
+                newHover = i
+                break
+            end
+        end
+    end
+    if newHover ~= hoverBtn then
+        if hoverBtn and buttons[hoverBtn] and buttons[hoverBtn].hover then
+            buttons[hoverBtn].hover(false)
+        end
+        hoverBtn = newHover
+        if hoverBtn and buttons[hoverBtn].hover then
+            buttons[hoverBtn].hover(true)
         end
     end
 end)
 
--- ---------------- главный цикл ----------------
--- Опрос по умолчанию раз в секунду: реже = меньше нагрузки и риска кика.
--- setProp сам пишет только при реальном отличии, так что в покое нагрузка нулевая.
+UIS.InputEnded:Connect(function(input)
+    if isDown(input) then
+        draggingPanel = false
+        draggingSlider = nil
+    end
+end)
+
+-- ================= главный цикл =================
+-- Опрос раз в секунду: реже = меньше нагрузки и риска кика.
+-- setProp пишет только при реальном отличии, в покое нагрузка нулевая.
 task.spawn(function()
     while true do
         applyLight()
@@ -283,4 +342,4 @@ task.spawn(function()
     end
 end)
 
-print("[RESIDENCE MASSACRE] Fullbright + Speed loaded | drag sliders, top bar = move window")
+print("[RESIDENCE MASSACRE] Fullbright + Speed loaded | drag = move window, drag slider = set value")
