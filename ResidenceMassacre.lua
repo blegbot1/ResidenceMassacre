@@ -8,8 +8,10 @@
 --  Loader: raw.../refs/heads/main/ResidenceMassacre.lua
 --  Запуск: loadstring(game:HttpGet("https://raw.githubusercontent.com/blegbot1/ResidenceMassacre/refs/heads/main/ResidenceMassacre.lua",true))()
 --
---  Ввод сделан через UserInputService + ручной хит-тест,
---  потому что UI игры перехватывает клики по GuiObject'ам.
+--  Ввод двойной: прямой GuiObject.InputBegan на каждой кнопке
+--  (как на слайдерах) + глобальный UIS.InputBegan с ручным
+--  хит-тестом как запасной путь. Координаты берём из
+--  UIS:GetMouseLocation(), а не из input.Position.
 -- ============================================================
 
 -- Place ID Residence Massacre.
@@ -141,12 +143,36 @@ local function inRect(p, pos, size)
     return p.X >= pos.X and p.X <= pos.X + size.X and p.Y >= pos.Y and p.Y <= pos.Y + size.Y
 end
 
+-- защита от двойного срабатывания, когда один клик ловят
+-- сразу два пути ввода (GuiObject.InputBegan + UIS.InputBegan)
+local lastClickAt = 0
+local function clickGuard()
+    local now = os.clock()
+    if now - lastClickAt < 0.12 then return false end
+    lastClickAt = now
+    return true
+end
+
+local function isDownType(t)
+    return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
+end
+
+-- надёжные координаты мыши: GetMouseLocation() согласован
+-- с AbsolutePosition (у input.Position бывают расхождения с инсетами)
+local function mousePos(input)
+    local ok, mp = pcall(function() return UIS:GetMouseLocation() end)
+    if ok and mp then return mp end
+    if input then return input.Position end
+    return Vector2.zero
+end
+
 local function mkToggle(y, text, flag)
     local holder = Instance.new("Frame")
     holder.Size = UDim2.new(1, -20, 0, 26)
     holder.Position = UDim2.fromOffset(10, y)
     holder.BackgroundColor3 = BG
     holder.BorderSizePixel = 0
+    holder.Active = true
     holder.Parent = panel
     Instance.new("UICorner", holder).CornerRadius = UDim.new(0, 6)
 
@@ -166,16 +192,33 @@ local function mkToggle(y, text, flag)
         holder.BackgroundColor3 = on and EL or BG
     end
 
+    local function doToggle()
+        if not clickGuard() then return end
+        G[flag] = not G[flag]
+        paint()
+        applyLight()
+        applySpeed()
+        -- фидбек: мигаем фиолетовым, чтобы было видно, что клик дошёл
+        coroutine.wrap(function()
+            holder.BackgroundColor3 = PURPLE
+            task.wait(0.09)
+            paint()
+        end)()
+    end
+
     buttons[#buttons + 1] = {
         get = function() return holder.AbsolutePosition, holder.AbsoluteSize end,
-        cb = function()
-            G[flag] = not G[flag]
-            paint()
-            applyLight()
-            applySpeed()
-        end,
+        cb = doToggle,
         hover = function(on) holder.BackgroundColor3 = on and HOVER or (G[flag] and EL or BG) end,
     }
+
+    -- путь 1: прямой ивент на самой кнопке (как у рабочих слайдеров)
+    holder.InputBegan:Connect(function(inp)
+        if isDownType(inp.UserInputType) then
+            doToggle()
+        end
+    end)
+
     paint()
 end
 
@@ -205,6 +248,7 @@ local function mkSlider(y, text, flag, min, max, step, stepTxt)
     bar.Position = UDim2.fromOffset(0, 20)
     bar.BackgroundColor3 = EL
     bar.BorderSizePixel = 0
+    bar.Active = true
     bar.Parent = holder
     Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
 
@@ -234,11 +278,21 @@ local function mkSlider(y, text, flag, min, max, step, stepTxt)
         applySpeed()
     end
 
-    sliders[#sliders + 1] = {
+    local s = {
         get = function() return bar.AbsolutePosition, bar.AbsoluteSize end,
         onDown = function(p) setFromX(p.X) end,
         onMove = function(p) setFromX(p.X) end,
     }
+    sliders[#sliders + 1] = s
+
+    -- путь 1: прямой ивент на полосе слайдера
+    bar.InputBegan:Connect(function(inp)
+        if isDownType(inp.UserInputType) then
+            draggingSlider = s
+            s.onDown(mousePos(inp))
+        end
+    end)
+
     paint()
 end
 
@@ -253,81 +307,86 @@ local dragOff = Vector2.new(0, 0)
 local hoverBtn = nil
 
 local function isDown(input)
-    local t = input.UserInputType
-    return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
+    return isDownType(input.UserInputType)
 end
 
 UIS.InputBegan:Connect(function(input, processed)
-    -- НЕ проверяем processed: игра помечает клик как обработанный своим UI,
-    -- но нам всё равно нужно обработать его
-    if not isDown(input) then return end
-    local p = input.Position
-    if not inRect(p, panel.AbsolutePosition, panel.AbsoluteSize) then return end
+    pcall(function()
+        -- НЕ проверяем processed: игра помечает клик как обработанный своим UI,
+        -- но нам всё равно нужно обработать его
+        if not isDown(input) then return end
+        local p = mousePos(input)
+        if not inRect(p, panel.AbsolutePosition, panel.AbsoluteSize) then return end
 
-    -- слайдер?
-    for _, s in ipairs(sliders) do
-        local pos, size = s.get()
-        if inRect(p, pos, size) then
-            draggingSlider = s
-            s.onDown(p)
-            return
+        -- слайдер?
+        for _, s in ipairs(sliders) do
+            local pos, size = s.get()
+            if inRect(p, pos, size) then
+                draggingSlider = s
+                s.onDown(p)
+                return
+            end
         end
-    end
 
-    -- кнопка?
-    for _, b in ipairs(buttons) do
-        local pos, size = b.get()
-        if inRect(p, pos, size) then
-            b.cb()
-            return
+        -- кнопка?
+        for _, b in ipairs(buttons) do
+            local pos, size = b.get()
+            if inRect(p, pos, size) then
+                b.cb()
+                return
+            end
         end
-    end
 
-    -- иначе тянем окно за шапку
-    if p.Y <= panel.AbsolutePosition.Y + TITLE_H then
-        draggingPanel = true
-        dragOff = Vector2.new(p.X - panel.AbsolutePosition.X, p.Y - panel.AbsolutePosition.Y)
-    end
+        -- иначе тянем окно за шапку
+        if p.Y <= panel.AbsolutePosition.Y + TITLE_H then
+            draggingPanel = true
+            dragOff = Vector2.new(p.X - panel.AbsolutePosition.X, p.Y - panel.AbsolutePosition.Y)
+        end
+    end)
 end)
 
 UIS.InputMoved:Connect(function(input)
-    local p = input.Position
-    if draggingSlider then
-        draggingSlider.onMove(p)
-        return
-    end
-    if draggingPanel then
-        panel.Position = UDim2.new(0, p.X - dragOff.X, 0, p.Y - dragOff.Y)
-        return
-    end
-    -- подсветка кнопки под курсором
-    local inside = inRect(p, panel.AbsolutePosition, panel.AbsoluteSize)
-    local newHover = nil
-    if inside then
-        for i, b in ipairs(buttons) do
-            local pos, size = b.get()
-            if inRect(p, pos, size) then
-                newHover = i
-                break
+    pcall(function()
+        local p = mousePos(input)
+        if draggingSlider then
+            draggingSlider.onMove(p)
+            return
+        end
+        if draggingPanel then
+            panel.Position = UDim2.new(0, p.X - dragOff.X, 0, p.Y - dragOff.Y)
+            return
+        end
+        -- подсветка кнопки под курсором
+        local inside = inRect(p, panel.AbsolutePosition, panel.AbsoluteSize)
+        local newHover = nil
+        if inside then
+            for i, b in ipairs(buttons) do
+                local pos, size = b.get()
+                if inRect(p, pos, size) then
+                    newHover = i
+                    break
+                end
             end
         end
-    end
-    if newHover ~= hoverBtn then
-        if hoverBtn and buttons[hoverBtn] and buttons[hoverBtn].hover then
-            buttons[hoverBtn].hover(false)
+        if newHover ~= hoverBtn then
+            if hoverBtn and buttons[hoverBtn] and buttons[hoverBtn].hover then
+                buttons[hoverBtn].hover(false)
+            end
+            hoverBtn = newHover
+            if hoverBtn and buttons[hoverBtn].hover then
+                buttons[hoverBtn].hover(true)
+            end
         end
-        hoverBtn = newHover
-        if hoverBtn and buttons[hoverBtn].hover then
-            buttons[hoverBtn].hover(true)
-        end
-    end
+    end)
 end)
 
 UIS.InputEnded:Connect(function(input)
-    if isDown(input) then
-        draggingPanel = false
-        draggingSlider = nil
-    end
+    pcall(function()
+        if isDown(input) then
+            draggingPanel = false
+            draggingSlider = nil
+        end
+    end)
 end)
 
 -- ================= главный цикл =================
@@ -343,4 +402,4 @@ task.spawn(function()
     end
 end)
 
-print("[RESIDENCE MASSACRE] Fullbright + Speed loaded | drag = move window, drag slider = set value")
+print("[RESIDENCE MASSACRE] v1.1 dual-input loaded | кнопки мигают при клике | drag = move window")
