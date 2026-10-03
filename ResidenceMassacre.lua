@@ -258,7 +258,8 @@ local function isDown(input)
 end
 
 UIS.InputBegan:Connect(function(input, processed)
-    if processed then return end
+    -- НЕ проверяем processed: игра помечает клик как обработанный своим UI,
+    -- но нам всё равно нужно обработать его
     if not isDown(input) then return end
     local p = input.Position
     if not inRect(p, panel.AbsolutePosition, panel.AbsoluteSize) then return end
