@@ -1,11 +1,18 @@
 -- ============================================================
---  ELITE TOOL | Fullbright + Speed
---  Универсальный клиентский скрипт для любой Roblox-игры.
---  Ничего не ломает на сервере: только меняет клиентские
---  свойства света и Humanoid.WalkSpeed.
+--  RESIDENCE MASSACRE | Fullbright + Speed
+--  Клиентский скрипт под Residence Massacre.
+--  Только клиентские свойства: Lighting + Humanoid.WalkSpeed.
+--  Никакого вмешательства в сервер и обхода защиты.
 --
---  Перезапуск: скрипт сам цепляется к CharacterAdded.
+--  Repo: https://github.com/blegbot1/ResidenceMassacre
+--  Loader: raw.../refs/heads/main/ResidenceMassacre.lua
+--
+--  Респавн подхватывается сам через CharacterAdded.
 -- ============================================================
+
+-- Place ID Residence Massacre.
+-- Заполни, чтобы скрипт работал ТОЛЬКО в этой игре (nil = в любой).
+local ONLY_PLACE_ID = nil
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -13,12 +20,17 @@ local UIS = game:GetService("UserInputService")
 local Lighting = game:GetService("Lighting")
 local LP = Players.LocalPlayer
 
+if ONLY_PLACE_ID and game.PlaceId ~= ONLY_PLACE_ID then
+    warn("[RM] это не Residence Massacre (PlaceId " .. tostring(game.PlaceId) .. ") — выход")
+    return
+end
+
 local G = getgenv()
-G.EB_FB = G.EB_FB or true        -- fullbright
-G.EB_Bright = G.EB_Bright or 3   -- яркость 0..10
-G.EB_NoFog = G.EB_NoFog or true  -- без тумана/теней
-G.EB_Speed = G.EB_Speed or 50    -- скорость 0..300
-G.EB_SpeedOn = G.EB_SpeedOn or true
+G.RM_FB = G.RM_FB or true          -- fullbright
+G.RM_Bright = G.RM_Bright or 3     -- яркость 0..10
+G.RM_NoFog = G.RM_NoFog or true    -- без тумана/теней
+G.RM_Speed = G.RM_Speed or 50      -- скорость 0..300
+G.RM_SpeedOn = G.RM_SpeedOn or true
 
 -- ---------------- применение ----------------
 local function setProp(obj, name, value)
@@ -28,8 +40,8 @@ local function setProp(obj, name, value)
 end
 
 local function applyLight()
-    if not G.EB_FB then return end
-    local b = G.EB_Bright or 3
+    if not G.RM_FB then return end
+    local b = G.RM_Bright or 3
     setProp(Lighting, "Brightness", b)
     setProp(Lighting, "ClockTime", 14)
     setProp(Lighting, "Ambient", Color3.fromRGB(200, 200, 200))
@@ -39,7 +51,7 @@ local function applyLight()
     setProp(Lighting, "ExposureCompensation", 0.4)
     setProp(Lighting, "EnvironmentDiffuseScale", 1)
     setProp(Lighting, "EnvironmentSpecularScale", 0)
-    if G.EB_NoFog then
+    if G.RM_NoFog then
         setProp(Lighting, "GlobalShadows", false)
         setProp(Lighting, "FogStart", -100000)
         setProp(Lighting, "FogEnd", 100000)
@@ -48,11 +60,11 @@ local function applyLight()
 end
 
 local function applySpeed()
-    if not G.EB_SpeedOn then return end
+    if not G.RM_SpeedOn then return end
     local ch = LP.Character
     local hum = ch and ch:FindFirstChildOfClass("Humanoid")
     if hum and hum.Parent then
-        setProp(hum, "WalkSpeed", G.EB_Speed or 50)
+        setProp(hum, "WalkSpeed", G.RM_Speed or 50)
     end
 end
 
@@ -69,7 +81,7 @@ local PURPLE = Color3.fromRGB(150, 90, 235)
 local TEXT = Color3.fromRGB(235, 230, 245)
 
 local gui = Instance.new("ScreenGui")
-gui.Name = "EliteTool"
+gui.Name = "ResidenceMassacreTool"
 gui.ResetOnSpawn = false
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.Parent = LP:WaitForChild("PlayerGui")
@@ -99,7 +111,7 @@ local function mkLabel(parent, text, size, bold)
     return l
 end
 
-local title = mkLabel(panel, "ELITE TOOL | Fullbright", UDim2.new(1, -20, 0, 24), true)
+local title = mkLabel(panel, "RESIDENCE MASSACRE | Fullbright", UDim2.new(1, -20, 0, 24), true)
 title.Position = UDim2.fromOffset(10, 8)
 title.TextSize = 15
 
@@ -139,9 +151,9 @@ local function mkToggle(y, text, flag)
     return holder
 end
 
-mkToggle(38, "Fullbright", "EB_FB")
-mkToggle(68, "No fog / shadows", "EB_NoFog")
-mkToggle(98, "Speed hack", "EB_SpeedOn")
+mkToggle(38, "Fullbright", "RM_FB")
+mkToggle(68, "No fog / shadows", "RM_NoFog")
+mkToggle(98, "Speed hack", "RM_SpeedOn")
 
 -- слайдеры: brightness + speed
 local function mkSlider(y, text, flag, min, max, step, stepTxt)
@@ -214,8 +226,8 @@ local function mkSlider(y, text, flag, min, max, step, stepTxt)
     paint()
 end
 
-mkSlider(130, "Brightness", "EB_Bright", 0, 10, 0.5, "")
-mkSlider(170, "Speed", "EB_Speed", 0, 300, 1, " st")
+mkSlider(130, "Brightness", "RM_Bright", 0, 10, 0.5, "")
+mkSlider(170, "Speed", "RM_Speed", 0, 300, 1, " st")
 
 -- перетаскивание окна
 UIS.InputBegan:Connect(function(input, gp)
@@ -255,4 +267,4 @@ task.spawn(function()
     end
 end)
 
-print("[ELITE TOOL] Fullbright + Speed loaded | drag = sliders, top bar = move window")
+print("[RESIDENCE MASSACRE] Fullbright + Speed loaded | drag sliders, top bar = move window")

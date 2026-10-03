@@ -1,7 +1,8 @@
-# ELITE BRIGHT — Fullbright + Speed
+# Residence Massacre — Fullbright + Speed
 
-Универсальный клиентский скрипт для Roblox: **Fullbright** и **настраиваемая скорость**.
-Работает в любой игре (изначально сделано под **Residence Massacre**).
+Клиентский скрипт под **Residence Massacre**: **Fullbright** и **настраиваемая скорость**.
+
+Меняет только клиентские свойства (`Lighting`, `Humanoid.WalkSpeed`). Никакого вмешательства в сервер, обхода защиты или античита нет.
 
 ---
 
@@ -10,20 +11,20 @@
 Вставь в executor и нажми Execute:
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/blegbot1/EliteBright-Speed/refs/heads/main/Fullbright_Speed.lua",true))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/blegbot1/ResidenceMassacre/refs/heads/main/ResidenceMassacre.lua",true))()
 ```
 
-Или используй `loader.lua` — он тянет тот же файл с проверкой ошибок.
+Или используй `loader.lua` — он тянет тот же файл и пишет в консоль причину, если что-то пошло не так.
 
-### Автозапуск при входе в игру
-
-Впиши строку выше в **Autoexec** экзекутора. Чтобы работало **только** в нужной игре:
+### Только для Residence Massacre
 
 ```lua
-if game.PlaceId == ТУТ_ID_ИГРЫ then
-    loadstring(game:HttpGet("https://raw.githubusercontent.com/blegbot1/EliteBright-Speed/refs/heads/main/Fullbright_Speed.lua",true))()
+if game.PlaceId == ТУТ_ID then
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/blegbot1/ResidenceMassacre/refs/heads/main/ResidenceMassacre.lua",true))()
 end
 ```
+
+То же самое можно вписать в начало самого `ResidenceMassacre.lua` — там есть константа `ONLY_PLACE_ID` (по умолчанию `nil`, то есть скрипт стартует в любой игре; впиши ID, и он будет работать только в Residence Massacre).
 
 ---
 
@@ -31,40 +32,40 @@ end
 
 | Элемент | Что делает |
 |---|---|
-| **Fullbright** | `Lighting.Brightness`, `ClockTime = 14`, белые `Ambient` / `OutdoorAmbient` / `ColorShift` — видно во всех тёмных зонах |
-| **No fog / shadows** | `GlobalShadows = false`, `FogStart = -100000`, `FogEnd = 100000` — без тумана |
+| **Fullbright** | `Brightness`, `ClockTime = 14`, белые `Ambient` / `OutdoorAmbient` / `ColorShift` — видно в тёмных зонах |
+| **No fog / shadows** | `GlobalShadows = false`, `FogStart = -100000`, `FogEnd = 100000` |
 | **Brightness** | слайдер 0–10, шаг 0.5 |
 | **Speed hack** | тогл скорости |
 | **Speed** | слайдер 0–300, шаг 1 (по умолчанию 50) |
 
-Окно можно **перетаскивать** за верхнюю полосу. Тёмно-фиолетовая тема, как у ELITE HUB.
+Окно тёмно-фиолетовое, перетаскивается за верхнюю полосу.
 
-Все значения переприменяются **каждые 0.05 сек** — игры обычно сбрасывают свет и `WalkSpeed` своими скриптами. На респавне скрипт цепляется заново через `CharacterAdded`, перезаходить не нужно.
+Значения переприменяются **каждые 0.05 сек** — игра обычно сбрасывает свет и `WalkSpeed` своими скриптами. На респавне скрипт цепляется заново через `CharacterAdded`.
 
-## Флаги (можно задать до запуска)
+## Флаги (задать до запуска)
 
 ```lua
-getgenv().EB_FB      = true  -- fullbright
-getgenv().EB_Bright  = 3     -- яркость 0..10
-getgenv().EB_NoFog   = true  -- без тумана и теней
-getgenv().EB_SpeedOn = true
-getgenv().EB_Speed   = 50    -- скорость 0..300
+getgenv().RM_FB      = true  -- fullbright
+getgenv().RM_Bright  = 3     -- яркость 0..10
+getgenv().RM_NoFog   = true  -- без тумана и теней
+getgenv().RM_SpeedOn = true
+getgenv().RM_Speed   = 50    -- скорость 0..300
 ```
 
 ## Структура
 
 ```
-EliteBright-Speed/
-├── Fullbright_Speed.lua   # сам скрипт
-├── loader.lua             # лоадер с raw-ссылки
+ResidenceMassacre/
+├── ResidenceMassacre.lua   # сам скрипт
+├── loader.lua              # лоадер с raw-ссылки
 ├── README.md
 └── .gitignore
 ```
 
 ## Про античит
 
-Скрипт меняет **только клиентские свойства** (`Lighting`, `Humanoid.WalkSpeed`) — никакого обхода защиты, инжектов или вмешательства в сеть. Если игра серверно возвращает эти значения обратно, обходить её реакцию скрипт не будет.
+Скрипт трогает только клиентские свойства. Если игра серверно возвращает их обратно — обходить её реакцию скрипт не будет.
 
 ## Ответственность
 
-Использование — на свой страх и риск. Правила игры стоит прочитать перед запуском.
+Использование — на свой страх и риск, правила игры лучше прочитать.
