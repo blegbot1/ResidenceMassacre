@@ -109,6 +109,7 @@ end
 -- а не скорость. Shift = ускорение x1.6.
 local camFwd, camRight = nil, nil
 local groundT = 0
+local standOffset = nil -- реальная высота стойки над землёй (замер, не хардкод)
 
 local function moveKeys()
     local x, z = 0, 0
@@ -140,18 +141,41 @@ RunService.RenderStepped:Connect(function(dt)
         local step = spd * math.min(dt, 0.05)
         local np = hrp.Position + camFwd * z * step + camRight * x * step
 
-        -- держим корпус на земле: рейкаст вниз раз в 0.15с (без спама)
+        -- Держим корпус на земле БЕЗ рывков вверх:
+        --  * замеряем реальную высоту стойки (не хардкод "+1");
+        --  * рейкаст вниз раз в 0.1с;
+        --  * подъём больше 1.5 студа (мусор/объект на полу) игнорируем,
+        --    вниз опускаем плавно, не более 5 студ за тик.
         local now = os.clock()
-        if now - groundT > 0.15 then
+        if now - groundT > 0.1 then
             groundT = now
             local params = RaycastParams.new()
             params.FilterDescendantsInstances = {ch}
             params.IgnoreWater = true
-            local res = workspace:Raycast(np + Vector3.new(0, 3, 0), Vector3.new(0, -40, 0), params)
-            if res and not res.Instance:IsA("Terrain") then
-                np = Vector3.new(np.X, res.Position.Y + 1, np.Z)
-            elseif not res then
-                np = Vector3.new(np.X, np.Y, np.Z)
+
+            -- эталон: сколько корпус реально стоит над землёй прямо сейчас
+            local under = workspace:Raycast(hrp.Position, Vector3.new(0, -30, 0), params)
+            if under then
+                local off = hrp.Position.Y - under.Position.Y
+                if off >= 0 and off < 6 then
+                    standOffset = off
+                end
+            end
+            local off = standOffset or 2
+
+            -- земля под целевой точкой (старт чуть выше — ловим подъём)
+            local res = workspace:Raycast(
+                Vector3.new(np.X, np.Y + 2, np.Z),
+                Vector3.new(0, -80, 0), params)
+            if res then
+                local targetY = res.Position.Y + off
+                local rise = targetY - np.Y
+                if rise <= 0 then
+                    np = Vector3.new(np.X, math.max(targetY, np.Y - 5), np.Z)
+                elseif rise <= 1.5 then
+                    np = Vector3.new(np.X, targetY, np.Z)
+                end
+                -- rise > 1.5: держим текущую высоту — без прыжка вверх
             end
         end
 
@@ -746,6 +770,120 @@ Main:CreateColorPicker({
 
 Main:CreateLabel("Mutant ESP: хайлайт и метка HP видны сквозь стены")
 
+-- ================= вкладка Settings (кастомизация темы) =================
+local SettingsTab = Window:CreateTab("Settings", 4483362458)
+
+-- снимок дефолтной темы — для кнопки сброса
+local DEFAULT_THEME = {}
+for k, v in pairs(getgenv().RM_Theme) do
+    DEFAULT_THEME[k] = v
+end
+
+local function changeThemeNow()
+    pcall(function()
+        if type(Rayfield.ChangeTheme) == "function" then
+            Rayfield:ChangeTheme(getgenv().RM_Theme)
+        end
+    end)
+end
+
+-- перекрасить градиент на шапке (нарисован заранее, тема сама его не трогает)
+local function recolorGradient(c)
+    pcall(function()
+        if not eliteGui or not eliteGui.Parent then return end
+        local topbar = eliteGui:FindFirstChild("Topbar", true)
+        if not topbar then return end
+        for _, g in ipairs(topbar:GetDescendants()) do
+            if g:IsA("UIGradient") and g.Name == "EliteGradient" then
+                g.Color = ColorSequence.new({
+                    ColorSequenceKeypoint.new(0, c),
+                    ColorSequenceKeypoint.new(0.5, c:Lerp(Color3.new(0, 0, 0), 0.35)),
+                    ColorSequenceKeypoint.new(1, c:Lerp(Color3.new(0, 0, 0), 0.7)),
+                })
+            end
+        end
+    end)
+end
+
+local function setThemeKeys(map)
+    local t = getgenv().RM_Theme
+    for k, v in pairs(map) do
+        t[k] = v
+    end
+    changeThemeNow()
+end
+
+SettingsTab:CreateLabel("— Кастомизация темы ELITE HUB —")
+
+SettingsTab:CreateColorPicker({
+    Name = "Акцент",
+    Color = getgenv().RM_Theme.TabBackgroundSelected,
+    Flag = "RM_ThemeAccent",
+    Callback = function(c)
+        setThemeKeys({
+            Accent = c,
+            TabBackgroundSelected = c,
+            ToggleEnabled = c,
+            SliderProgress = c,
+            SliderStroke = c:Lerp(Color3.new(1, 1, 1), 0.2),
+            ToggleEnabledStroke = c:Lerp(Color3.new(1, 1, 1), 0.3),
+            ToggleEnabledOuterStroke = c:Lerp(Color3.new(0, 0, 0), 0.3),
+            NotificationActionsBackground = c:Lerp(Color3.new(1, 1, 1), 0.35),
+            DropdownSelected = c:Lerp(Color3.new(0, 0, 0), 0.5),
+        })
+        recolorGradient(c)
+    end,
+})
+
+SettingsTab:CreateColorPicker({
+    Name = "Фон окна",
+    Color = getgenv().RM_Theme.Background,
+    Flag = "RM_ThemeBg",
+    Callback = function(c)
+        setThemeKeys({
+            Background = c,
+            Topbar = c:Lerp(Color3.new(1, 1, 1), 0.07),
+            Shadow = c:Lerp(Color3.new(0, 0, 0), 0.5),
+            ElementBackground = c:Lerp(Color3.new(1, 1, 1), 0.06),
+            ElementBackgroundHover = c:Lerp(Color3.new(1, 1, 1), 0.16),
+            SecondaryElementBackground = c:Lerp(Color3.new(0, 0, 0), 0.2),
+            InputBackground = c:Lerp(Color3.new(0, 0, 0), 0.1),
+            NotificationBackground = c:Lerp(Color3.new(1, 1, 1), 0.05),
+            TabBackground = c:Lerp(Color3.new(1, 1, 1), 0.12),
+            DropdownUnselected = c:Lerp(Color3.new(0, 0, 0), 0.05),
+        })
+    end,
+})
+
+SettingsTab:CreateColorPicker({
+    Name = "Текст",
+    Color = getgenv().RM_Theme.TextColor,
+    Flag = "RM_ThemeText",
+    Callback = function(c)
+        setThemeKeys({
+            TextColor = c,
+            TabTextColor = c:Lerp(Color3.new(0, 0, 0), 0.25),
+            SelectedTabTextColor = c,
+        })
+    end,
+})
+
+pcall(function()
+    SettingsTab:CreateButton({
+        Name = "Сбросить тему (ELITE)",
+        Callback = function()
+            for k, v in pairs(DEFAULT_THEME) do
+                getgenv().RM_Theme[k] = v
+            end
+            changeThemeNow()
+            recolorGradient(Color3.fromRGB(150, 90, 235))
+            notify("Тема сброшена", 2)
+        end,
+    })
+end)
+
+SettingsTab:CreateLabel("Окно перетаскивается за шапку. Тема сохраняется в конфиге.")
+
 -- ================= главный цикл =================
 -- Опрос раз в секунду: реже = меньше нагрузки и риска кика.
 -- setProp пишет только при реальном отличии, в покое нагрузка нулевая.
@@ -758,4 +896,4 @@ task.spawn(function()
     end
 end)
 
-print("[RESIDENCE MASSACRE] v3.8 rayfield loaded | GUI в CoreGui — не пропадает при ESC | Fullbright + TP Speed + Stamina + Mutant ESP")
+print("[RESIDENCE MASSACRE] v3.9 rayfield loaded | Settings: кастомизация темы | без рывка вверх при TP Speed | GUI в CoreGui (ESC)")
