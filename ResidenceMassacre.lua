@@ -1030,9 +1030,12 @@ task.spawn(function()
                     for _, e in ipairs(espCache) do
                         if e.kind == "item" and e.inst.Parent
                             and (e.prompt or e.cd)
-                            -- генератор не трогаем — им занимается Auto fuel
+                            -- генератор/капсула не трогаем — ими занимаются
+                            -- Auto fuel и Auto PowerCell (Ночь 2)
                             and not string.find(string.lower(e.itemName or e.inst.Name),
                                 "generator", 1, true)
+                            and not string.find(string.lower(e.itemName or e.inst.Name),
+                                "powercell", 1, true)
                             -- электрику не трогаем — ею занимается Auto electric
                             and not isElectric(e.inst)
                             and (not e.clickAt or os.clock() - e.clickAt
@@ -1249,6 +1252,95 @@ local function fuelManual()
     end)
     return true
 end
+
+-- ===== Ночь 2: капсула PowerCell → генератор =====
+-- Схема: свободная капсула (PowerCell ВНЕ Generator, с ClickDetector)
+-- → телепорт рядом (обязательно стоя рядом) → клик → доставка к
+-- Generator → клик по генератору → вставка. «В руках» = стал потомком
+-- персонажа ИЛИ кликнули <15с назад. 4 неудачные вставки → стоп.
+G.RM_AutoCell = false -- без флага: всегда стартует выключенным
+local cellGrabAt = 0  -- последний клик по капсуле (окно доставки 15с)
+local cellTriedAt = 0 -- последняя попытка вставки (кулдаун попыток)
+local cellTries = 0   -- неудачных вставок подряд
+local cellWarned = false
+
+-- свободная капсула: Model «PowerCell» с ClickDetector, НЕ внутри Generator
+local function findLooseCell()
+    local gen = findByModelName("generator")
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("Model")
+            and string.find(string.lower(d.Name), "powercell", 1, true)
+            and not (gen and d:IsDescendantOf(gen)) then
+            local cd = d:FindFirstChildWhichIsA("ClickDetector", true)
+            if cd then return d, cd end
+        end
+    end
+    return nil, nil
+end
+
+task.spawn(function()
+    while true do
+        if getgenv().RM_Run ~= RUN_ID then return end
+        local okC, errC = pcall(function()
+            if G.RM_AutoCell and not pickupBusy then
+                local ch = LP.Character
+                local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    if cellTries >= 4 and not cellWarned then
+                        cellWarned = true
+                        print("[RM] Ночь 2: капсула не вставилась 4 раза — авто остановлено. "
+                            .. "Включи заново после разбора и скажи, как вставляется вручную")
+                    end
+                    local gen, cdGen = findByModelName("generator")
+                    local cell, cdCell = findLooseCell()
+                    if cell and cdCell and gen and cdGen and cellTries < 4 then
+                        local now = os.clock()
+                        local held = cell:IsDescendantOf(ch)
+                        local delay = tonumber(G.RM_ActionDelay) or 0.1
+                        local dt = now - cellGrabAt
+                        -- взять: ещё не взяли и окно доставки вышло
+                        local wantGrab = (not held) and dt > 15
+                        -- внести: в руках или брали <15с назад; не чаще 2с
+                        local wantPut = (held or dt <= 15)
+                            and (now - cellTriedAt) > math.max(delay, 2)
+
+                        if wantGrab then
+                            pickupBusy = true
+                            local origin = hrp.CFrame
+                            local okG, errG = pcall(function()
+                                -- встанет сам рядом с капсулой и жмёт
+                                fuelPress(hrp, cdCell.Position, cdCell)
+                                cellGrabAt = os.clock()
+                                task.wait(delay)
+                            end)
+                            pcall(function() smoothTP(hrp, origin) end)
+                            pickupBusy = false
+                            if not okG then
+                                print("[RM] Ночь 2 (капсула): " .. tostring(errG))
+                            end
+                        elseif wantPut then
+                            pickupBusy = true
+                            local origin = hrp.CFrame
+                            local okG, errG = pcall(function()
+                                fuelPress(hrp, cdGen.Position, cdGen)
+                                cellTriedAt = os.clock()
+                                cellTries = cellTries + 1
+                                task.wait(delay)
+                            end)
+                            pcall(function() smoothTP(hrp, origin) end)
+                            pickupBusy = false
+                            if not okG then
+                                print("[RM] Ночь 2 (вставка): " .. tostring(errG))
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+        if not okC then print("[RM] цикл Ночь 2: " .. tostring(errC)) end
+        task.wait(0.5)
+    end
+end)
 
 -- ===== электрика: ящик (FuseBox) + провода + ключ (Wrench) =====
 -- Провода ломаются случайно (подсвечены Highlight / искры) и требуют
@@ -1968,7 +2060,7 @@ PlayerTab:CreateKeybind({
 
 -- ================= вкладки по ночам =================
 -- Ночь 1: провода + заправка генератора
--- Ночь 2: пусто (как договорились)
+-- Ночь 2: капсула PowerCell → генератор
 -- Ночь 3: монстр → аимбот
 local Night1 = Window:CreateTab("Ночь 1", 4483362458)
 
@@ -2033,7 +2125,33 @@ Night1:CreateToggle({
     end,
 })
 
-local Night2 = Window:CreateTab("Ночь 2", 4483362458) -- пусто
+local Night2 = Window:CreateTab("Ночь 2", 4483362458)
+Night2:CreateSection("Генератор")
+local cellToggle
+cellToggle = Night2:CreateToggle({
+    Name = "Auto PowerCell",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_AutoCell = v
+        if v then
+            cellTries = 0
+            cellWarned = false
+            cellGrabAt = 0
+            cellTriedAt = 0
+            notify("Auto PowerCell ON — капсула → генератор", 3)
+        else
+            notify("Auto PowerCell OFF", 2)
+        end
+    end,
+})
+Night2:CreateKeybind({
+    Name = "Бинд PowerCell",
+    CurrentKeybind = "K",
+    Flag = "RM_BindCell",
+    Callback = function()
+        cellToggle:Set(not G.RM_AutoCell)
+    end,
+})
 
 local Night3 = Window:CreateTab("Ночь 3", 4483362458)
 Night3:CreateSection("Аимбот")
@@ -2281,4 +2399,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.11 rayfield loaded | быстрые твины (500 ст/с, от 0.05с) + кулдауны 0.03–5с (дефолт 0.1с) | страховка pickupBusy | защита от повторного запуска | отладка электрики | вкладка Игрок | Ночь 1 = генератор+электрика, Ночь 3 = аимбот | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.12 rayfield loaded | Ночь 2 = Auto PowerCell (капсула → генератор, бинд K) | Ночь 1 = генератор+электрика, Ночь 3 = аимбот | быстрые твины/кулдауны | страховка pickupBusy | отладка электрики | вкладка Игрок | ESP | Settings")
