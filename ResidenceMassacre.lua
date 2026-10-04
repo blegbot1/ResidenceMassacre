@@ -168,30 +168,40 @@ local stamNames = {"stam", "stmina", "energy", "fatigue", "sprint", "endurance"}
 local stamRef = nil     -- {v=Instance, max=number, path=string}
 local stamNoteOnce = false
 
--- плашка внизу экрана: показывает, что бесконечная стамина ВКЛ
-local stamStatus = Instance.new("TextLabel")
-do
-    local sg = Instance.new("ScreenGui")
-    sg.Name = "RM_StaminaStatus"
-    sg.ResetOnSpawn = false
-    sg.DisplayOrder = 998
-    sg.Parent = LP:WaitForChild("PlayerGui")
+-- плашка внизу экрана: показывает, что бесконечная стамина ВКЛ.
+-- Лежит в CoreGui (не в PlayerGui): игра при ESC правит только PlayerGui.
+local stamStatus, stamStatusGui = nil, nil
+local function ensureStatusGui()
+    pcall(function()
+        if stamStatusGui and stamStatusGui.Parent then return end
+        local CoreGui = game:GetService("CoreGui")
+        local sg = Instance.new("ScreenGui")
+        sg.Name = "RM_StaminaStatus"
+        sg.ResetOnSpawn = false
+        sg.DisplayOrder = 100000
+        sg.Parent = CoreGui
 
-    stamStatus.Name = "Status"
-    stamStatus.AnchorPoint = Vector2.new(0.5, 1)
-    stamStatus.Position = UDim2.new(0.5, 0, 1, -20)
-    stamStatus.Size = UDim2.fromOffset(260, 24)
-    stamStatus.BackgroundColor3 = Color3.fromRGB(18, 14, 28)
-    stamStatus.BackgroundTransparency = 0.3
-    stamStatus.BorderSizePixel = 0
-    stamStatus.Font = Enum.Font.GothamBold
-    stamStatus.TextColor3 = Color3.fromRGB(120, 255, 140)
-    stamStatus.TextSize = 13
-    stamStatus.Text = "БЕСКОНЕЧНАЯ СТАМИНА: ВКЛ"
-    stamStatus.Visible = false
-    Instance.new("UICorner", stamStatus).CornerRadius = UDim.new(0, 6)
-    stamStatus.Parent = sg
+        local lbl = Instance.new("TextLabel")
+        lbl.Name = "Status"
+        lbl.AnchorPoint = Vector2.new(0.5, 1)
+        lbl.Position = UDim2.new(0.5, 0, 1, -20)
+        lbl.Size = UDim2.fromOffset(260, 24)
+        lbl.BackgroundColor3 = Color3.fromRGB(18, 14, 28)
+        lbl.BackgroundTransparency = 0.3
+        lbl.BorderSizePixel = 0
+        lbl.Font = Enum.Font.GothamBold
+        lbl.TextColor3 = Color3.fromRGB(120, 255, 140)
+        lbl.TextSize = 13
+        lbl.Text = "БЕСКОНЕЧНАЯ СТАМИНА: ВКЛ"
+        lbl.Visible = false
+        Instance.new("UICorner", lbl).CornerRadius = UDim.new(0, 6)
+        lbl.Parent = sg
+
+        stamStatusGui = sg
+        stamStatus = lbl
+    end)
 end
+ensureStatusGui()
 
 local function isStamCandidate(v)
     if not (v:IsA("NumberValue") or v:IsA("IntValue") or v:IsA("IntConstrainedValue")) then
@@ -521,6 +531,97 @@ pcall(function()
     end
 end)
 
+-- ================= защита GUI от ESC =================
+-- Игра при ESC выключает/удаляет чужие ScreenGuis в PlayerGui и не
+-- возвращает их. Переносим окно в CoreGui, держим DisplayOrder 100000
+-- и каждые 0.2с: включаем обратно выключенное, пересоздаём/ищем
+-- удалённое.
+local CoreGui = game:GetService("CoreGui")
+local eliteGui = nil
+local eliteWasFound = false
+local eliteLostNotified = false
+
+local function findEliteGui()
+    pcall(function()
+        eliteGui = nil
+        -- сначала по имени Rayfield (если видно), потом по структуре Main > Topbar
+        for _, container in ipairs({CoreGui, LP:FindFirstChildOfClass("PlayerGui")}) do
+            if container then
+                for _, g in ipairs(container:GetChildren()) do
+                    if g:IsA("ScreenGui") and string.find(string.lower(g.Name), "rayfield", 1, true) then
+                        eliteGui = g
+                        break
+                    end
+                end
+                if not eliteGui then
+                    for _, g in ipairs(container:GetChildren()) do
+                        if g:IsA("ScreenGui") then
+                            local m = g:FindFirstChild("Main", true)
+                            if m and m:FindFirstChild("Topbar") then
+                                eliteGui = g
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+            if eliteGui then break end
+        end
+    end)
+end
+
+findEliteGui()
+if eliteGui then
+    eliteWasFound = true
+    pcall(function()
+        eliteGui.Parent = CoreGui
+        eliteGui.DisplayOrder = 100000
+        eliteGui.ResetOnSpawn = false
+    end)
+else
+    print("[RM] Окно Rayfield не найдено — ESC-защита для него не применяется")
+end
+
+task.spawn(function()
+    while true do
+        pcall(function()
+            -- плашка стамины: живая? иначе пересоздаём
+            ensureStatusGui()
+            if stamStatusGui and stamStatusGui.Parent then
+                if stamStatusGui.DisplayOrder < 100000 then
+                    stamStatusGui.DisplayOrder = 100000
+                end
+                if not stamStatusGui.Enabled then
+                    stamStatusGui.Enabled = true
+                end
+            end
+            -- окно Rayfield
+            if not eliteGui or not eliteGui.Parent then
+                eliteGui = nil
+                findEliteGui()
+                if eliteGui then
+                    pcall(function() eliteGui.Parent = CoreGui end)
+                elseif eliteWasFound and not eliteLostNotified then
+                    eliteLostNotified = true
+                    print("[RM] Окно Rayfield удалили — перезапусти скрипт")
+                end
+            end
+            if eliteGui and eliteGui.Parent then
+                if eliteGui.DisplayOrder < 100000 then
+                    eliteGui.DisplayOrder = 100000
+                end
+                if not eliteGui.Enabled then
+                    eliteGui.Enabled = true
+                end
+                if eliteGui.Parent ~= CoreGui then
+                    pcall(function() eliteGui.Parent = CoreGui end)
+                end
+            end
+        end)
+        task.wait(0.2)
+    end
+end)
+
 -- ================= вкладка =================
 local Main = Window:CreateTab("Main", 4483362458)
 
@@ -657,4 +758,4 @@ task.spawn(function()
     end
 end)
 
-print("[RESIDENCE MASSACRE] v3.7 rayfield loaded | Fullbright + TP Speed + Stamina + Mutant ESP | статус стамины внизу экрана")
+print("[RESIDENCE MASSACRE] v3.8 rayfield loaded | GUI в CoreGui — не пропадает при ESC | Fullbright + TP Speed + Stamina + Mutant ESP")
