@@ -78,6 +78,10 @@ local function restoreGroup(list)
     end
 end
 
+-- снимок Atmosphere (туман от неё перебивает Lighting.FogEnd —
+-- если гасить только Fog*, туман всё равно остаётся)
+local ATM_ORIG = nil
+
 local function applyLight()
     if G.RM_FB then
         local b = G.RM_Bright or 3
@@ -96,9 +100,32 @@ local function applyLight()
         setProp(Lighting, "FogStart", -100000)
         setProp(Lighting, "FogEnd", 100000)
         setProp(Lighting, "FogColor", Color3.fromRGB(255, 255, 255))
+        -- туман через Atmosphere — гасим тоже (иначе он перебивает Fog*)
+        pcall(function()
+            local a = Lighting:FindFirstChildOfClass("Atmosphere")
+            if a then
+                if not ATM_ORIG then
+                    ATM_ORIG = { Density = a.Density, Haze = a.Haze, Offset = a.Offset }
+                end
+                setProp(a, "Density", 0)
+                setProp(a, "Haze", 0)
+                setProp(a, "Offset", 0)
+            end
+        end)
     else
         restoreGroup(BRIGHT)
         restoreGroup(FOG)
+        -- вернуть туман Atmosphere как было
+        pcall(function()
+            if ATM_ORIG then
+                local a = Lighting:FindFirstChildOfClass("Atmosphere")
+                if a then
+                    setProp(a, "Density", ATM_ORIG.Density)
+                    setProp(a, "Haze", ATM_ORIG.Haze)
+                    setProp(a, "Offset", ATM_ORIG.Offset)
+                end
+            end
+        end)
     end
 end
 
@@ -142,14 +169,20 @@ RunService.RenderStepped:Connect(function()
     if G.RM_FB then pcall(applyLight) end
     if G.RM_CamMode ~= "game" then pcall(applyCam) end
 end)
+-- поздний повтор света: игра может возвращать туман своим скриптом
+-- на том же кадре — применим ЕЩЁ РАЗ после всех RenderStepped
+pcall(function() RunService:UnbindFromRenderStep("RMLightLate") end)
+RunService:BindToRenderStep("RMLightLate", Enum.RenderPriority.Camera.Value + 10, function()
+    if G.RM_FB then pcall(applyLight) end
+end)
 
 -- ================= TP walk (speed без WalkSpeed) =================
 -- Двигаем HumanoidRootPart телепортами по направлению взгляда.
 -- WalkSpeed остаётся штатной — сервер видит телепорты позиции,
 -- а не скорость. Shift = ускорение x1.6.
 local camFwd, camRight = nil, nil
-local groundT = 0
 local standOffset = nil -- реальная высота стойки над землёй (замер, не хардкод)
+local CLIMB = 2.5 -- максимум подъёма за шаг: ступени лестницы, пандус, ящик
 
 local function moveKeys()
     local x, z = 0, 0
@@ -181,10 +214,13 @@ RunService.RenderStepped:Connect(function(dt)
         local step = spd * math.min(dt, 0.05)
         local stepVec = camFwd * z * step + camRight * x * step
 
-        -- Не проходим сквозь стены/предметы при спиде: рейкаст по
-        -- направлению движения от корпуса и от колена. Низкие объекты
-        -- (ступеньки/мусор до 1.5 студ) не блокируем — земной снап их
-        -- и так перешагивает; всё выше — останавливаемся перед ним.
+        -- Не проходим сквозь стены/предметы, но МОЖНО лезть по ступеням:
+        --  * уровень головы (feet+4): попадание = стена/дверь — блок;
+        --  * корпус/колено: вниз от точки попадания (с высоты feet+10) —
+        --    поверхность не выше CLIMB = ступенька/пандус, заходим на
+        --    неё; выше = предмет — обрезаем шаг перед ним;
+        --  * земля под концом шага выше CLIMB — высокий предмет в пути.
+        -- Обрезанный шаг = до встречного препятствия минус 0.4 студа.
         local stepLen = stepVec.Magnitude
         if stepLen > 0 then
             local rdir = stepVec.Unit
@@ -192,41 +228,62 @@ RunService.RenderStepped:Connect(function(dt)
             params.FilterDescendantsInstances = {ch}
             params.IgnoreWater = true
             local feetY = hrp.Position.Y - (standOffset or 2)
-            local allow = stepLen
+            local rayLen = stepLen + 0.4
+            local blockD = nil
+            local blocked = false
+
+            -- что стоит на месте встречи (для корпуса/колена)
+            local function wallThere(pos)
+                local probe = workspace:Raycast(
+                    Vector3.new(pos.X, feetY + 10, pos.Z),
+                    Vector3.new(0, -20, 0), params)
+                return (not probe) or (probe.Position.Y - feetY) > CLIMB
+            end
+
             local origins = {
-                hrp.Position,
-                Vector3.new(hrp.Position.X, feetY + 0.7, hrp.Position.Z),
+                { Vector3.new(hrp.Position.X, feetY + 4, hrp.Position.Z), true },   -- голова
+                { hrp.Position, false },                                             -- корпус
+                { Vector3.new(hrp.Position.X, feetY + 0.7, hrp.Position.Z), false }, -- колено
             }
-            for _, o in ipairs(origins) do
-                local h = workspace:Raycast(o, rdir * (stepLen + 0.4), params)
+            for _, rec in ipairs(origins) do
+                local o, isHead = rec[1], rec[2]
+                local h = workspace:Raycast(o, rdir * rayLen, params)
                 if h and not h.Instance:IsA("Terrain") then
-                    local topY = h.Position.Y
-                    pcall(function()
-                        if h.Instance:IsA("BasePart") then
-                            local cf, sz = h.Instance:GetBoundingBox()
-                            topY = cf.Position.Y + sz.Y / 2
-                        end
-                    end)
-                    if topY > feetY + 1.5 then
+                    -- голова бьётся только о высокое (это и есть стена),
+                    -- корпус/колено — меряем высоту препятствия рейкастом
+                    if isHead or wallThere(h.Position) then
+                        blocked = true
                         local d = (h.Position - o).Magnitude - 0.4
-                        if d < allow then allow = math.max(d, 0) end
+                        if d < 0 then d = 0 end
+                        if not blockD or d < blockD then blockD = d end
                     end
                 end
             end
-            if allow < stepLen then
-                stepVec = rdir * allow
+
+            if not blocked then
+                -- земля под концом шага: выше CLIMB — высоко, не туда
+                local endPos = hrp.Position + stepVec
+                local probe = workspace:Raycast(
+                    Vector3.new(endPos.X, feetY + CLIMB + 0.5, endPos.Z),
+                    Vector3.new(0, -(CLIMB + 6), 0), params)
+                if probe and (probe.Position.Y - feetY) > CLIMB then
+                    blocked = true
+                end
+            end
+
+            if blocked then
+                stepVec = rdir * (blockD or 0)
             end
         end
         local np = hrp.Position + stepVec
 
         -- Держим корпус на земле БЕЗ рывков вверх:
         --  * замеряем реальную высоту стойки (не хардкод "+1");
-        --  * рейкаст вниз раз в 0.1с;
-        --  * подъём больше 1.5 студа (мусор/объект на полу) игнорируем,
+        --  * рейкаст вниз КАЖДЫЙ тик: раз в 0.1с на лестницах шаг
+        --    перепрыгивал ступени и мы вставали внутри;
+        --  * подъём больше CLIMB (2.5 студ) не берём — дальше не прыгаем,
         --    вниз опускаем плавно, не более 5 студ за тик.
-        local now = os.clock()
-        if now - groundT > 0.1 then
-            groundT = now
+        do
             local params = RaycastParams.new()
             params.FilterDescendantsInstances = {ch}
             params.IgnoreWater = true
@@ -241,19 +298,20 @@ RunService.RenderStepped:Connect(function(dt)
             end
             local off = standOffset or 2
 
-            -- земля под целевой точкой (старт чуть выше — ловим подъём)
+            -- земля под целевой точкой (старт выше запланированного
+            -- подъём — иначе следующую ступень не находим)
             local res = workspace:Raycast(
-                Vector3.new(np.X, np.Y + 2, np.Z),
-                Vector3.new(0, -80, 0), params)
+                Vector3.new(np.X, np.Y + 4, np.Z),
+                Vector3.new(0, -90, 0), params)
             if res then
                 local targetY = res.Position.Y + off
                 local rise = targetY - np.Y
                 if rise <= 0 then
                     np = Vector3.new(np.X, math.max(targetY, np.Y - 5), np.Z)
-                elseif rise <= 1.5 then
+                elseif rise <= CLIMB then
                     np = Vector3.new(np.X, targetY, np.Z)
                 end
-                -- rise > 1.5: держим текущую высоту — без прыжка вверх
+                -- rise > CLIMB: держим текущую высоту — без прыжка вверх
             end
         end
 
@@ -1727,4 +1785,4 @@ end)
 
 SettingsTab:CreateLabel("Окно перетаскивается за шапку. Тема сохраняется в конфиге.")
 
-print("[RESIDENCE MASSACRE] v4.2 rayfield loaded | бинды + аимбот на монстра + скорость действий + анти-клип при спиде | предметы/автозабор/Auto fuel | ESP | свет | камера 1/3 | Settings")
+print("[RESIDENCE MASSACRE] v4.3 rayfield loaded | лестницы при спиде | туман (Atmosphere) гасится при Fullbright | бинды + аимбот + скорость действий + анти-клип | ESP | камера 1/3 | Settings")
