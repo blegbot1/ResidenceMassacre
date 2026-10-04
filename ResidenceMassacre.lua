@@ -158,15 +158,14 @@ RunService.RenderStepped:Connect(function(dt)
     end)
 end)
 
--- ================= infinite stamina (автопоиск + лок) =================
--- Не знаем, где в игре стамина: ищем типичные имена (stam/energy/fatigue)
--- среди NumberValue/IntValue внутри игрока и персонажа и держим на
--- максимуме. Пишем ТОЛЬКО при отличии, чтобы не спамить в сеть.
--- Если найдено несколько кандидатов — локкаются все.
+-- ================= infinite stamina (разовое обнаружение + лок) =================
+-- Не сканируем постоянно: ОДИН раз находим реальную стамину
+-- (та, что падает при беге), запоминаем ссылку и дальше крутим
+-- только её. Рескан только если значение исчезло (респавн).
 G.RM_StaminaLock = G.RM_StaminaLock or false
 local stamNames = {"stam", "stmina", "energy", "fatigue", "sprint", "endurance"}
-local stamCache = {}
-local stamNotified, stamFoundOnce = false, false
+local stamRef = nil     -- {v=Instance, max=number, path=string}
+local stamNoteOnce = false
 
 local function isStamCandidate(v)
     if not (v:IsA("NumberValue") or v:IsA("IntValue") or v:IsA("IntConstrainedValue")) then
@@ -179,45 +178,74 @@ local function isStamCandidate(v)
     return false
 end
 
-local function lockStamina()
+-- короткое наблюдение (~1.2с): кто реально падает — тот и стамина
+local function discoverStaminaOnce()
+    local cands = {}
     local roots = {LP, LP.Character}
-    local found = 0
     for _, r in ipairs(roots) do
         if r then
             for _, d in ipairs(r:GetDescendants()) do
                 if isStamCandidate(d) then
-                    found = found + 1
                     local ok, cur = pcall(function() return d.Value end)
                     if ok and type(cur) == "number" then
-                        local mx = stamCache[d] or cur
-                        if cur > mx then mx = cur end
-                        stamCache[d] = mx
-                        if cur < mx - 0.01 then
-                            pcall(function() d.Value = mx end)
-                        end
+                        cands[#cands + 1] = {v = d, mn = cur, mx = cur}
                     end
                 end
             end
         end
     end
-    return found
+    if #cands == 0 then return nil end
+    -- наблюдаем 1.2с (в это время беги!), фиксируем мин/макс
+    local t0 = os.clock()
+    while os.clock() - t0 < 1.2 do
+        for _, c in ipairs(cands) do
+            if c.v.Parent then
+                local ok, val = pcall(function() return c.v.Value end)
+                if ok and type(val) == "number" then
+                    if val < c.mn then c.mn = val end
+                    if val > c.mx then c.mx = val end
+                end
+            end
+        end
+        task.wait(0.1)
+    end
+    -- кандидат с самым большим разбросом = тот, что реально падает при беге
+    local best = cands[1]
+    for i = 2, #cands do
+        if (cands[i].mx - cands[i].mn) > (best.mx - best.mn) then
+            best = cands[i]
+        end
+    end
+    local okN, fn = pcall(function() return best.v:GetFullName() end)
+    return { v = best.v, max = best.mx, path = okN and fn or best.v.Name }
 end
 
 task.spawn(function()
     while true do
         if G.RM_StaminaLock then
             pcall(function()
-                local found = lockStamina()
-                if found == 0 and not stamNotified then
-                    stamNotified = true
-                    print("[RM] Стамина не найдена — ищу stam/energy/fatigue в игроке и персонаже. Если стамина в модуле/атрибуте — скажи имя поля")
-                elseif found > 0 and not stamFoundOnce then
-                    stamFoundOnce = true
-                    print("[RM] Стамина найдена и заблокирована: " .. found .. " value(s)")
+                -- значение исчезло (респавн) -> переобнаружение
+                if stamRef and (not stamRef.v or stamRef.v.Parent == nil) then stamRef = nil end
+                if not stamRef then
+                    local r = discoverStaminaOnce()
+                    if r then
+                        stamRef = r
+                        print(("[RM] Стамина зафиксирована: %s (max %s) — больше не сканирую"):format(r.path, tostring(r.max)))
+                    elseif not stamNoteOnce then
+                        stamNoteOnce = true
+                        print("[RM] Стамина не найдена (ищу stam/energy/fatigue). Если она в модуле/атрибуте — подскажи имя")
+                    end
+                end
+                -- крутим только одну ссылку, пишем только при отличии
+                if stamRef then
+                    local ok, cur = pcall(function() return stamRef.v.Value end)
+                    if ok and type(cur) == "number" and cur < stamRef.max - 0.01 then
+                        pcall(function() stamRef.v.Value = stamRef.max end)
+                    end
                 end
             end)
         end
-        task.wait(0.3)
+        task.wait(0.2)
     end
 end)
 
@@ -425,9 +453,9 @@ Main:CreateToggle({
     Callback = function(v)
         G.RM_StaminaLock = v
         if v then
-            notify("Stamina lock ON — ищу stam/energy и держу на максе", 4)
+            notify("Stamina ON — побегай 2-3 секунды, скрипт зафиксирует значение", 5)
         else
-            notify("Stamina lock OFF", 2)
+            notify("Stamina OFF", 2)
         end
     end,
 })
@@ -444,4 +472,4 @@ task.spawn(function()
     end
 end)
 
-print("[RESIDENCE MASSACRE] v3.3 rayfield loaded | Fullbright + TP Speed + Stamina lock | всё выключено по умолчанию")
+print("[RESIDENCE MASSACRE] v3.4 rayfield loaded | Fullbright + TP Speed + Stamina (разовое обнаружение) | всё выключено по умолчанию")
