@@ -1770,9 +1770,23 @@ end
 ensureEliteProtection()
 
 task.spawn(function()
+    local busySince = nil
     while true do
         if getgenv().RM_Run ~= RUN_ID then return end
         pcall(function()
+            -- страховка: pickupBusy завис дольше 30с (нормальное
+            -- действие ≤ ~16с даже на макс. задержке) — сбрасываем,
+            -- иначе навсегда выключатся спид/автозабор/заправка
+            if pickupBusy then
+                busySince = busySince or os.clock()
+                if os.clock() - busySince > 30 then
+                    pickupBusy = false
+                    busySince = nil
+                    print("[RM] страховка: зависшее авто-действие сброшено")
+                end
+            else
+                busySince = nil
+            end
             -- контейнер ESP: жив? иначе пересоздаём
             ensureESPScreen()
             -- плашка стамины: живая? иначе пересоздаём
@@ -2267,4 +2281,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.9 rayfield loaded | фикс зависания pickupBusy | защита от повторного запуска | отладка электрики в консоли | слайдер «Скорость твинов» | вкладка Игрок | Ночь 1 = генератор+электрика, Ночь 3 = аимбот | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.10 rayfield loaded | страховка зависшего pickupBusy (30с) | фикс зависания pickupBusy | защита от повторного запуска | отладка электрики в консоли | вкладка Игрок | Ночь 1 = генератор+электрика, Ночь 3 = аимбот | ESP | Settings")
