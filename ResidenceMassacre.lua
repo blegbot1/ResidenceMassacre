@@ -1,9 +1,10 @@
 -- ============================================================
---  ELITE HUB | Residence Massacre (Fullbright + Speed)
+--  ELITE HUB | Residence Massacre (Fullbright)
 --  GUI на библиотеке Rayfield (как в Fort Blox).
---  Только клиентские свойства: Lighting + Humanoid.WalkSpeed.
---  Античит НЕ обходим: минимальная нагрузка (запись свойств
---  только при изменении, опрос 1с, Speed выключен по умолчанию).
+--  Только клиентские свойства Lighting — серверная проверка
+--  скорости кикает сходу, поэтому Speed убран.
+--  Античит НЕ обходим: запись свойств только при изменении,
+--  опрос 1с, в покое нагрузка нулевая.
 --
 --  Repo:   https://github.com/blegbot1/ResidenceMassacre
 --  Запуск: loadstring(game:HttpGet("https://raw.githubusercontent.com/blegbot1/ResidenceMassacre/refs/heads/main/ResidenceMassacre.lua",true))()
@@ -23,12 +24,10 @@ if ONLY_PLACE_ID and game.PlaceId ~= ONLY_PLACE_ID then
 end
 
 local G = getgenv()
-G.RM_FB = G.RM_FB ~= nil and G.RM_FB or true      -- fullbright
-G.RM_Bright = G.RM_Bright or 3                    -- яркость 0..10
+G.RM_FB = G.RM_FB ~= nil and G.RM_FB or true          -- fullbright
+G.RM_Bright = G.RM_Bright or 3                        -- яркость 0..10
 G.RM_NoFog = G.RM_NoFog ~= nil and G.RM_NoFog or true -- без тумана/теней
-G.RM_SpeedOn = false                              -- ВЫКЛ по умолчанию (триггер кика)
-G.RM_Speed = G.RM_Speed or 25                     -- скорость 0..300
-G.RM_Poll = G.RM_Poll or 1                        -- как часто возвращать значения (сек)
+G.RM_Poll = G.RM_Poll or 1                            -- как часто возвращать значения (сек)
 
 -- ================= применение =================
 -- пишем свойство ТОЛЬКО если оно реально отличается.
@@ -67,20 +66,6 @@ local function applyLight()
         setProp(Lighting, "FogColor", Color3.fromRGB(255, 255, 255))
     end
 end
-
-local function applySpeed()
-    if not G.RM_SpeedOn then return end
-    local ch = LP.Character
-    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-    if hum and hum.Parent then
-        setProp(hum, "WalkSpeed", G.RM_Speed or 25)
-    end
-end
-
-LP.CharacterAdded:Connect(function()
-    task.wait(0.3)
-    applySpeed()
-end)
 
 -- ================= Rayfield =================
 local Rayfield = nil
@@ -156,7 +141,7 @@ end
 local Window = Rayfield:CreateWindow({
     Name = "ELITE HUB | Residence Massacre",
     LoadingTitle = "ELITE HUB",
-    LoadingSubtitle = "Residence Massacre | Fullbright + Speed",
+    LoadingSubtitle = "Residence Massacre | Fullbright",
     Theme = ELITE,
     ConfigurationSaving = { Enabled = true, FolderName = "RMScripts", FileName = "ResidenceMassacre" },
     KeySystem = false,
@@ -203,7 +188,7 @@ end)
 -- ================= вкладка =================
 local Main = Window:CreateTab("Main", 4483362458)
 
-Main:CreateLabel("Fullbright + Speed | клиентские свойства | без обхода античита")
+Main:CreateLabel("Fullbright | клиентские свойства | без обхода античита")
 
 Main:CreateToggle({
     Name = "Fullbright",
@@ -212,6 +197,7 @@ Main:CreateToggle({
     Callback = function(v)
         G.RM_FB = v
         applyLight()
+        notify("Fullbright: " .. (v and "ON" or "OFF"), 2)
     end,
 })
 
@@ -222,21 +208,6 @@ Main:CreateToggle({
     Callback = function(v)
         G.RM_NoFog = v
         applyLight()
-    end,
-})
-
--- БЕЗ флага: SpeedOn не сохраняется в конфиг и всегда стартует выключенным
-Main:CreateToggle({
-    Name = "Speed hack",
-    CurrentValue = false,
-    Callback = function(v)
-        G.RM_SpeedOn = v
-        applySpeed()
-        if v then
-            notify("Speed ON — включай 20–25 и без рывков, иначе кик", 5)
-        else
-            notify("Speed OFF", 2)
-        end
     end,
 })
 
@@ -253,19 +224,6 @@ Main:CreateSlider({
 })
 
 Main:CreateSlider({
-    Name = "Speed",
-    Range = {0, 300},
-    Increment = 1,
-    Suffix = " st",
-    CurrentValue = G.RM_Speed,
-    Flag = "RM_Speed",
-    Callback = function(v)
-        G.RM_Speed = v
-        applySpeed()
-    end,
-})
-
-Main:CreateSlider({
     Name = "Check every",
     Range = {0.1, 5},
     Increment = 0.1,
@@ -277,21 +235,18 @@ Main:CreateSlider({
     end,
 })
 
-Main:CreateLabel("Speed выключен по умолчанию: частые записи WalkSpeed триггерят Error 267")
+Main:CreateLabel("Speed убран: серверная проверка кикает на движении")
 
 -- ================= главный цикл =================
 -- Опрос раз в секунду: реже = меньше нагрузки и риска кика.
 -- setProp пишет только при реальном отличии, в покое нагрузка нулевая.
 task.spawn(function()
     while true do
-        pcall(function()
-            applyLight()
-            applySpeed()
-        end)
+        pcall(applyLight)
         local poll = G.RM_Poll or 1
         if poll < 0.1 then poll = 0.1 end
         task.wait(poll)
     end
 end)
 
-print("[RESIDENCE MASSACRE] v2.0 rayfield loaded | окно ELITE HUB | Fullbright включён, Speed выключен")
+print("[RESIDENCE MASSACRE] v3.0 rayfield loaded | ELITE HUB | Fullbright работает, Speed удалён")
