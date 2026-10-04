@@ -27,6 +27,33 @@ if ONLY_PLACE_ID and game.PlaceId ~= ONLY_PLACE_ID then
 end
 
 local G = getgenv()
+
+-- Защита от повторного запуска в той же сессии: старый прогон
+-- замолкает — все его циклы/кадровые подписки выходят по RUN_ID,
+-- иначе два прогона дерутся (двойные телепорты, двойной ESP, окна).
+getgenv().RM_Run = (getgenv().RM_Run or 0) + 1
+local RUN_ID = getgenv().RM_Run
+-- старые артефакты прошлого прогона (скрипт выполнили повторно):
+-- экраны ESP/плашки + окно Rayfield в CoreGui (чужие хабы в
+-- gethui/PlayerGui не трогаем — только то, что у нас в CoreGui)
+pcall(function()
+    for _, g in ipairs(game:GetService("CoreGui"):GetChildren()) do
+        if g:IsA("ScreenGui") then
+            if g.Name == "RM_ESP" or g.Name == "RM_StaminaStatus" then
+                g:Destroy()
+            else
+                local isRF = string.find(string.lower(g.Name),
+                    "rayfield", 1, true) ~= nil
+                if not isRF then
+                    local m = g:FindFirstChild("Main", true)
+                    isRF = m ~= nil and m:FindFirstChild("Topbar") ~= nil
+                end
+                if isRF then g:Destroy() end
+            end
+        end
+    end
+end)
+
 G.RM_FB = G.RM_FB ~= nil and G.RM_FB or true          -- fullbright (+ всегда без тумана)
 G.RM_Bright = G.RM_Bright or 3                        -- яркость 0..10
 G.RM_TPSpeed = false                                  -- TP walk (ВЫКЛ по умолчанию)
@@ -190,6 +217,7 @@ pcall(applyCam)
 -- что-то реально изменилось). Раньше опрос раз в секунду давал
 -- мерцание: игра успевала вернуть темноту между опросами.
 RunService.RenderStepped:Connect(function()
+    if getgenv().RM_Run ~= RUN_ID then return end
     if G.RM_FB then pcall(applyLight) end
     if G.RM_CamMode ~= "game" then pcall(applyCam) end
 end)
@@ -220,6 +248,7 @@ local function moveKeys()
 end
 
 RunService.RenderStepped:Connect(function(dt)
+    if getgenv().RM_Run ~= RUN_ID then return end
     if not G.RM_TPSpeed or pickupBusy then return end
     pcall(function()
         local cam = workspace.CurrentCamera
@@ -442,6 +471,7 @@ end
 
 task.spawn(function()
     while true do
+        if getgenv().RM_Run ~= RUN_ID then return end
         pcall(function()
             stamStatus.Visible = G.RM_StaminaLock == true
         end)
@@ -563,9 +593,11 @@ pcall(function()
 end)
 -- спавн/десавн — события для быстрой реакции
 workspace.DescendantAdded:Connect(function(obj)
+    if getgenv().RM_Run ~= RUN_ID then return end
     if isMutantModel(obj) then addMutant(obj) end
 end)
 workspace.DescendantRemoving:Connect(function(obj)
+    if getgenv().RM_Run ~= RUN_ID then return end
     if inCache[obj] then removeMutant(obj) end
 end)
 -- ПОСТОЯННЫЙ скан: ловит переименования и спавны, которые
@@ -573,6 +605,7 @@ end)
 -- и была переименована в Mutant). Раз в секунду.
 task.spawn(function()
     while true do
+        if getgenv().RM_Run ~= RUN_ID then return end
         pcall(function()
             for _, d in ipairs(workspace:GetDescendants()) do
                 if isMutantModel(d) then addMutant(d) end
@@ -583,6 +616,7 @@ task.spawn(function()
 end)
 
 RunService.RenderStepped:Connect(function()
+    if getgenv().RM_Run ~= RUN_ID then return end
     pcall(function()
         local on = G.RM_MutantESP
         local lpch = LP.Character
@@ -859,6 +893,7 @@ end
 
 -- спавн/десавн — быстрая реакция (без ожидания секундного скана)
 workspace.DescendantAdded:Connect(function(obj)
+    if getgenv().RM_Run ~= RUN_ID then return end
     if obj:IsA("Model") then
         local k = modelKind(obj)
         if k and not espBy[obj] then espAdd(obj, k) end
@@ -866,17 +901,22 @@ workspace.DescendantAdded:Connect(function(obj)
     -- появился ClickDetector/Prompt (предмет/канистра/генератор) —
     -- сразу ресканим предметы, не ждём секундного скана
     if obj:IsA("ClickDetector") or obj:IsA("ProximityPrompt") then
-        task.defer(function() pcall(scanItems) end)
+        task.defer(function()
+            if getgenv().RM_Run == RUN_ID then pcall(scanItems) end
+        end)
     end
 end)
 workspace.DescendantRemoving:Connect(function(obj)
+    if getgenv().RM_Run ~= RUN_ID then return end
     if espBy[obj] then espRemove(obj) end
 end)
 
 pcall(scanEsp)
 task.spawn(function()
     while true do
-        pcall(scanEsp)
+        if getgenv().RM_Run ~= RUN_ID then return end
+        local okS, errS = pcall(scanEsp)
+        if not okS then print("[RM] скан ESP: " .. tostring(errS)) end
         task.wait(1)
     end
 end)
@@ -980,7 +1020,8 @@ end
 -- раз в 0.4с берём ближайший подходящий предмет из списка
 task.spawn(function()
     while true do
-        pcall(function()
+        if getgenv().RM_Run ~= RUN_ID then return end
+        local okP, errP = pcall(function()
             if G.RM_AutoPickup and not pickupBusy then
                 local ch = LP.Character
                 local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
@@ -1010,6 +1051,7 @@ task.spawn(function()
                 end
             end
         end)
+        if not okP then print("[RM] цикл автозабора: " .. tostring(errP)) end
         task.wait(0.4)
     end
 end)
@@ -1108,7 +1150,8 @@ end
 
 task.spawn(function()
     while true do
-        pcall(function()
+        if getgenv().RM_Run ~= RUN_ID then return end
+        local okF, errF = pcall(function()
             if G.RM_AutoFuel and not pickupBusy then
                 local ch = LP.Character
                 local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
@@ -1134,24 +1177,35 @@ task.spawn(function()
                     if wantCan or wantGen then
                         pickupBusy = true
                         local origin = hrp.CFrame
-                        local pressedCan = false
-                        if wantCan then
-                            pressedCan = fuelPress(hrp, can:GetPivot().Position, cdCan)
-                            if pressedCan then lastCanAt = os.clock() end
-                            task.wait(tonumber(G.RM_ActionDelay) or 3) -- кулдаун канистры
-                        end
-                        local canReady = pressedCan or held
-                            or ((os.clock() - lastCanAt) < 15)
-                        if G.RM_AutoFuel and cdGen and canReady then
-                            fuelPress(hrp, gen:GetPivot().Position, cdGen)
-                            task.wait(tonumber(G.RM_ActionDelay) or 3) -- кулдаун подачи топлива
-                        end
+                        -- тело в pcall: ошибка (респавн/исчезнувший объект
+                        -- посреди действия) не должна навсегда оставить
+                        -- pickupBusy=true — иначе выключатся спид,
+                        -- автозабор и электрика
+                        local okA, errA = pcall(function()
+                            local pressedCan = false
+                            if wantCan then
+                                pressedCan = fuelPress(hrp, can:GetPivot().Position, cdCan)
+                                if pressedCan then lastCanAt = os.clock() end
+                                task.wait(tonumber(G.RM_ActionDelay) or 3) -- кулдаун канистры
+                            end
+                            local canReady = pressedCan or held
+                                or ((os.clock() - lastCanAt) < 15)
+                            if G.RM_AutoFuel and cdGen and canReady then
+                                fuelPress(hrp, gen:GetPivot().Position, cdGen)
+                                task.wait(tonumber(G.RM_ActionDelay) or 3) -- кулдаун подачи топлива
+                            end
+                        end)
+                        -- возвращаемся всегда, даже после ошибки
                         pcall(function() smoothTP(hrp, origin) end)
                         pickupBusy = false
+                        if not okA then
+                            print("[RM] Auto fuel: " .. tostring(errA))
+                        end
                     end
                 end
             end
         end)
+        if not okF then print("[RM] цикл авто-заправки: " .. tostring(errF)) end
         task.wait(0.5)
     end
 end)
@@ -1163,15 +1217,16 @@ local function fuelManual()
     if pickupBusy then return false end
     task.spawn(function()
         pickupBusy = true
+        local hrp, origin = nil, nil
         local ok, err = pcall(function()
             local ch = LP.Character
-            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            hrp = ch and ch:FindFirstChild("HumanoidRootPart")
             if not hrp then error("нет персонажа") end
+            origin = hrp.CFrame -- точка возврата — как можно раньше
             local can, cdCan = findByModelName("jerrycan")
             local gen, cdGen = findByModelName("generator")
             if not (gen and cdGen) then error("генератор не найден") end
             if not (can and cdCan) then error("канистра не найдена") end
-            local origin = hrp.CFrame
             local delay = tonumber(G.RM_ActionDelay) or 3
             if not can:IsDescendantOf(ch) then
                 fuelPress(hrp, can:GetPivot().Position, cdCan)
@@ -1180,8 +1235,11 @@ local function fuelManual()
             end
             fuelPress(hrp, gen:GetPivot().Position, cdGen)
             task.wait(delay)
-            pcall(function() smoothTP(hrp, origin) end)
         end)
+        -- возвращаемся всегда, даже после ошибки
+        if hrp and origin then
+            pcall(function() smoothTP(hrp, origin) end)
+        end
         pickupBusy = false
         if ok then
             print("[RM] Заправка: канистра → генератор ✓")
@@ -1204,6 +1262,7 @@ local wireFixAt = {}       -- [модель провода] = когда чин�
 local wireTries = {}       -- [модель провода] = попыток; 2 → щёлкаем ящик
 local wrenchGetAt = 0       -- кулдаун добычи ключа
 local elecWarned = false
+local elecBrokenSeen = -1   -- сколько битых проводов видели вчера (для отладки)
 
 -- модель/папка/деталь по части имени; needCD = обязателен ClickDetector
 local function elecFind(sub, needCD)
@@ -1290,18 +1349,25 @@ local function elecClickBox(hrp, origin)
     local _, bcd = elecFind("fusebox", true)
     if not bcd then return false end
     pickupBusy = true
-    elecTP(hrp, bcd.Position, 2)
-    pcall(function() fireclickdetector(bcd) end)
-    fuseOpened = not fuseOpened
-    task.wait(0.5)
-    smoothTP(hrp, origin)
+    local okB, errB = pcall(function()
+        elecTP(hrp, bcd.Position, 2)
+        pcall(function() fireclickdetector(bcd) end)
+        fuseOpened = not fuseOpened
+        task.wait(0.5)
+    end)
+    -- возвращаемся всегда, даже после ошибки (респавн/исчез объект)
+    pcall(function() smoothTP(hrp, origin) end)
     pickupBusy = false
+    if not okB then
+        print("[RM] Электрика (ящик): " .. tostring(errB))
+    end
     return true
 end
 
 task.spawn(function()
     while true do
-        pcall(function()
+        if getgenv().RM_Run ~= RUN_ID then return end
+        local okE, errE = pcall(function()
             if G.RM_AutoElectric and not pickupBusy then
                 local ch = LP.Character
                 local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
@@ -1309,19 +1375,59 @@ task.spawn(function()
                     local broken = brokenWires()
                     local now = os.clock()
 
+                    -- отладка детектора: печатаем только при СМЕНЕ
+                    -- количества битых — тихо в обычном режиме
+                    if #broken ~= elecBrokenSeen then
+                        elecBrokenSeen = #broken
+                        print("[RM] Электрика: битых проводов " .. #broken
+                            .. (#broken > 0 and " — чиню" or " — простой"))
+                        local wires = elecFind("wires", false)
+                        if wires then
+                            for _, w in ipairs(wires:GetChildren()) do
+                                if w:IsA("Model") or w:IsA("Folder")
+                                    or w:IsA("BasePart") then
+                                    pcall(function()
+                                        local h = w:FindFirstChild("Highlight", true)
+                                        local s = w:FindFirstChild("Sparkles", true)
+                                        local st = w:FindFirstChild("Status", true)
+                                        local sv = "-"
+                                        if st then
+                                            pcall(function() sv = tostring(st.Value) end)
+                                            if sv == "-" then
+                                                pcall(function() sv = tostring(st.Text) end)
+                                            end
+                                        end
+                                        print(string.format(
+                                            "[RM]   %s: HL=%s/%s SP=%s ST=%s",
+                                            w.Name,
+                                            h and tostring(h.Enabled) or "-",
+                                            h and tostring(h.FillTransparency) or "-",
+                                            s and tostring(s.Enabled) or "-",
+                                            sv))
+                                    end)
+                                end
+                            end
+                        end
+                    end
+
                     -- 1) ключ: нет → телепорт к WrenchGiver и берём
                     if #broken > 0 and not findWrenchTool()
                         and (now - wrenchGetAt) > 4 then
-                        local giver, gcd = elecFind("wrenchgiver", true)
+                        local _, gcd = elecFind("wrenchgiver", true)
                         if gcd then
                             pickupBusy = true
                             local origin = hrp.CFrame
-                            elecTP(hrp, gcd.Position, 3)
-                            pcall(function() fireclickdetector(gcd) end)
-                            task.wait(1) -- выдача инструмента
-                            smoothTP(hrp, origin)
+                            local okW, errW = pcall(function()
+                                elecTP(hrp, gcd.Position, 3)
+                                pcall(function() fireclickdetector(gcd) end)
+                                task.wait(1) -- выдача инструмента
+                            end)
                             wrenchGetAt = os.clock()
+                            pcall(function() smoothTP(hrp, origin) end)
                             pickupBusy = false
+                            if not okW then
+                                print("[RM] Электрика (ключ): " .. tostring(errW))
+                            end
                             if not findWrenchTool() and not elecWarned then
                                 elecWarned = true
                                 print("[RM] Электрика: ключ (Wrench) не появился после WrenchGiver")
@@ -1350,27 +1456,33 @@ task.spawn(function()
                             else
                                 pickupBusy = true
                                 local origin = hrp.CFrame
-                                -- ключ в руки, если лежит в рюкзаке
-                                pcall(function()
+                                local okW, errW = pcall(function()
+                                    -- ключ в руки, если лежит в рюкзаке
                                     local tool = findWrenchTool()
                                     local hum = ch:FindFirstChildOfClass("Humanoid")
                                     if tool and hum and tool.Parent ~= ch then
                                         hum:EquipTool(tool)
                                     end
+                                    elecTP(hrp, w.cd.Position, 2)
+                                    pcall(function() fireclickdetector(w.cd) end)
+                                    task.wait(tonumber(G.RM_ActionDelay) or 3)
                                 end)
-                                elecTP(hrp, w.cd.Position, 2)
-                                pcall(function() fireclickdetector(w.cd) end)
+                                -- кулдауны ставим всегда: после ошибки не
+                                -- должно быть мгновенного повтора по кругу
                                 wireFixAt[w.model] = os.clock()
                                 wireTries[w.model] = (wireTries[w.model] or 0) + 1
-                                task.wait(tonumber(G.RM_ActionDelay) or 3)
-                                smoothTP(hrp, origin)
+                                pcall(function() smoothTP(hrp, origin) end)
                                 pickupBusy = false
+                                if not okW then
+                                    print("[RM] Электрика (провод): " .. tostring(errW))
+                                end
                             end
                         end
                     end
                 end
             end
         end)
+        if not okE then print("[RM] цикл электрики: " .. tostring(errE)) end
         task.wait(0.6)
     end
 end)
@@ -1420,6 +1532,7 @@ end)
 
 -- ===== рендер меток/хайлайтов каждый кадр =====
 RunService.RenderStepped:Connect(function()
+    if getgenv().RM_Run ~= RUN_ID then return end
     pcall(function()
         local ch = LP.Character
         local myHRP = ch and ch:FindFirstChild("HumanoidRootPart")
@@ -1658,6 +1771,7 @@ ensureEliteProtection()
 
 task.spawn(function()
     while true do
+        if getgenv().RM_Run ~= RUN_ID then return end
         pcall(function()
             -- контейнер ESP: жив? иначе пересоздаём
             ensureESPScreen()
@@ -2153,4 +2267,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.8 rayfield loaded | слайдер «Скорость твинов» | вкладка Игрок (спид+стамина+автозабор) | Ночь 1 = генератор+электрика, Ночь 3 = аимбот | подписи убраны | ESP | камера 1/3 | Settings")
+print("[RESIDENCE MASSACRE] v4.9 rayfield loaded | фикс зависания pickupBusy | защита от повторного запуска | отладка электрики в консоли | слайдер «Скорость твинов» | вкладка Игрок | Ночь 1 = генератор+электрика, Ночь 3 = аимбот | ESP | Settings")
