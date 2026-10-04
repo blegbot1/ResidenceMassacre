@@ -33,6 +33,7 @@ G.RM_TPSpeed = false                                  -- TP walk (ВЫКЛ по 
 G.RM_TPSpeedVal = G.RM_TPSpeedVal or 50               -- скорость телепорта, studs/s
 G.RM_StaminaLock = false                              -- infinite stamina (ВЫКЛ по умолчанию)
 G.RM_CamMode = G.RM_CamMode or "game"                 -- камера: game / first / third
+G.RM_ActionDelay = G.RM_ActionDelay or 3               -- задержка действий, с (кулдауны)
 local pickupBusy = false                              -- идёт автозабор (TP walk ждёт)
 
 -- ================= применение =================
@@ -178,7 +179,45 @@ RunService.RenderStepped:Connect(function(dt)
 
         local spd = (G.RM_TPSpeedVal or 50) * sprint
         local step = spd * math.min(dt, 0.05)
-        local np = hrp.Position + camFwd * z * step + camRight * x * step
+        local stepVec = camFwd * z * step + camRight * x * step
+
+        -- Не проходим сквозь стены/предметы при спиде: рейкаст по
+        -- направлению движения от корпуса и от колена. Низкие объекты
+        -- (ступеньки/мусор до 1.5 студ) не блокируем — земной снап их
+        -- и так перешагивает; всё выше — останавливаемся перед ним.
+        local stepLen = stepVec.Magnitude
+        if stepLen > 0 then
+            local rdir = stepVec.Unit
+            local params = RaycastParams.new()
+            params.FilterDescendantsInstances = {ch}
+            params.IgnoreWater = true
+            local feetY = hrp.Position.Y - (standOffset or 2)
+            local allow = stepLen
+            local origins = {
+                hrp.Position,
+                Vector3.new(hrp.Position.X, feetY + 0.7, hrp.Position.Z),
+            }
+            for _, o in ipairs(origins) do
+                local h = workspace:Raycast(o, rdir * (stepLen + 0.4), params)
+                if h and not h.Instance:IsA("Terrain") then
+                    local topY = h.Position.Y
+                    pcall(function()
+                        if h.Instance:IsA("BasePart") then
+                            local cf, sz = h.Instance:GetBoundingBox()
+                            topY = cf.Position.Y + sz.Y / 2
+                        end
+                    end)
+                    if topY > feetY + 1.5 then
+                        local d = (h.Position - o).Magnitude - 0.4
+                        if d < allow then allow = math.max(d, 0) end
+                    end
+                end
+            end
+            if allow < stepLen then
+                stepVec = rdir * allow
+            end
+        end
+        local np = hrp.Position + stepVec
 
         -- Держим корпус на земле БЕЗ рывков вверх:
         --  * замеряем реальную высоту стойки (не хардкод "+1");
@@ -831,7 +870,7 @@ local function doPickup(e)
     end)
     if teleported then task.wait(0.15) end -- позиция успевает дойти до сервера
     pcall(function() fireItem(e) end)
-    e.clickAt = os.clock() -- кулдаун 3с по каждой цели (как в игре)
+    e.clickAt = os.clock() -- кулдаун по каждой цели — из слайдера «Скорость действий»
     if teleported then
         task.wait(0.1)
         pcall(function() hrp.CFrame = origin end)
@@ -855,7 +894,8 @@ task.spawn(function()
                             -- генератор не трогаем — им занимается Auto fuel
                             and not string.find(string.lower(e.itemName or e.inst.Name),
                                 "generator", 1, true)
-                            and (not e.clickAt or os.clock() - e.clickAt >= 3)
+                            and (not e.clickAt or os.clock() - e.clickAt
+                                >= (tonumber(G.RM_ActionDelay) or 3))
                             and pickSelected(e.itemName) then
                             local pos = itemPos(e)
                             if pos then
@@ -879,7 +919,6 @@ end)
 -- телепорт к генератору → подать топливо (кулдаун ~3с) → обратно.
 -- Для сервера мы всё время стоим рядом с тем, что жмём.
 G.RM_AutoFuel = false -- без флага: всегда стартует выключенным
-local FUEL_CD = 3
 local lastCanAt = 0
 local fuelWarned = false
 
@@ -941,13 +980,13 @@ task.spawn(function()
                         if wantCan then
                             pressedCan = fuelPress(hrp, can:GetPivot().Position, cdCan)
                             if pressedCan then lastCanAt = os.clock() end
-                            task.wait(FUEL_CD) -- кулдаун канистры
+                            task.wait(tonumber(G.RM_ActionDelay) or 3) -- кулдаун канистры
                         end
                         local canReady = pressedCan or held
                             or ((os.clock() - lastCanAt) < 15)
                         if G.RM_AutoFuel and cdGen and canReady then
                             fuelPress(hrp, gen:GetPivot().Position, cdGen)
-                            task.wait(FUEL_CD) -- кулдаун подачи топлива
+                            task.wait(tonumber(G.RM_ActionDelay) or 3) -- кулдаун подачи топлива
                         end
                         pcall(function() hrp.CFrame = origin end)
                         pickupBusy = false
@@ -957,6 +996,49 @@ task.spawn(function()
         end)
         task.wait(0.5)
     end
+end)
+
+-- ===== аимбот на монстра (камера, бинд) =====
+-- Пока зажат бинд — камера доводится до ближайшего монстра/мутанта
+-- в радиусе 200 студ. Только камера: выстрелов и урона нет.
+G.RM_AimMonster = false -- без флага: всегда стартует выключенным
+local AIM_RANGE = 200
+
+local function aimTarget()
+    local ch = LP.Character
+    local myPos = ch and ch:FindFirstChild("HumanoidRootPart")
+        and ch.HumanoidRootPart.Position
+    if not myPos then return nil end
+    local best, bestD = nil, AIM_RANGE
+    local function consider(model)
+        if not model or not model.Parent then return end
+        local root = model:FindFirstChild("HumanoidRootPart", true)
+            or model:FindFirstChild("Head", true)
+        if root then
+            local d = (root.Position - myPos).Magnitude
+            if d < bestD then best, bestD = root, d end
+        end
+    end
+    for _, e in ipairs(espCache) do
+        if e.kind == "monster" then consider(e.inst) end
+    end
+    for _, e in ipairs(mutantCache) do
+        consider(e.model)
+    end
+    return best
+end
+
+pcall(function() RunService:UnbindFromRenderStep("RMAimMonster") end)
+RunService:BindToRenderStep("RMAimMonster", Enum.RenderPriority.Camera.Value + 1, function()
+    -- приоритет выше Camera — перекрываем штатную камеру после её апдейта
+    if not G.RM_AimMonster then return end
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        local target = aimTarget()
+        if cam and target then
+            cam.CFrame = CFrame.lookAt(cam.CFrame.Position, target.Position)
+        end
+    end)
 end)
 
 -- ===== рендер меток/хайлайтов каждый кадр =====
@@ -1260,7 +1342,8 @@ Main:CreateSlider({
 
 -- ===== Speed через TP walk (WalkSpeed не трогаем) =====
 -- без флага: не сохраняется в конфиг, всегда стартует выключенным
-Main:CreateToggle({
+local speedToggle
+speedToggle = Main:CreateToggle({
     Name = "Speed (TP walk)",
     CurrentValue = false,
     Callback = function(v)
@@ -1286,9 +1369,19 @@ Main:CreateSlider({
 
 Main:CreateLabel("Speed (TP walk): сервер видит телепорты, не скорость — но и телепорты могут палиться")
 
+Main:CreateKeybind({
+    Name = "Бинд TP speed",
+    CurrentKeybind = "B",
+    Flag = "RM_BindSpeed",
+    Callback = function()
+        speedToggle:Set(not G.RM_TPSpeed)
+    end,
+})
+
 -- ===== Infinite stamina (автопоиск) =====
 -- без флага: не сохраняется в конфиг, всегда стартует выключенным
-Main:CreateToggle({
+local stamToggle
+stamToggle = Main:CreateToggle({
     Name = "Infinite stamina",
     CurrentValue = false,
     Callback = function(v)
@@ -1301,6 +1394,15 @@ Main:CreateToggle({
             print("[RM] Бесконечная стамина: ВЫКЛ")
             notify("Stamina OFF", 2)
         end
+    end,
+})
+
+Main:CreateKeybind({
+    Name = "Бинд стамины",
+    CurrentKeybind = "N",
+    Flag = "RM_BindStam",
+    Callback = function()
+        stamToggle:Set(not G.RM_StaminaLock)
     end,
 })
 
@@ -1388,8 +1490,22 @@ ESP:CreateColorPicker({
     end,
 })
 
+ESP:CreateSlider({
+    Name = "Скорость действий",
+    Range = {0.1, 5},
+    Increment = 0.1,
+    Suffix = " s",
+    CurrentValue = G.RM_ActionDelay,
+    Flag = "RM_ActionDelay",
+    Callback = function(v)
+        G.RM_ActionDelay = v
+    end,
+})
+ESP:CreateLabel("Скорость действий: кулдауны автозабора и авто-заправки (0.1–5 с; меньше = быстрее, но игра даёт ~3с)")
+
 ESP:CreateLabel("Автозабор: телепорт к предмету → взять → обратно. Для сервера — «стоял рядом и забрал».")
-ESP:CreateToggle({
+local pickToggle
+pickToggle = ESP:CreateToggle({
     Name = "Auto pickup",
     CurrentValue = false,
     Callback = function(v)
@@ -1410,9 +1526,19 @@ pickDD = ESP:CreateDropdown({
 })
 ESP:CreateLabel("Что забирать: можно выбрать несколько. «Все» = всё подряд.")
 
+ESP:CreateKeybind({
+    Name = "Бинд Auto pickup",
+    CurrentKeybind = "H",
+    Flag = "RM_BindPick",
+    Callback = function()
+        pickToggle:Set(not G.RM_AutoPickup)
+    end,
+})
+
 ESP:CreateSection("Генератор")
 ESP:CreateLabel("Автотопливо: телепорт к JerryCan → взять (3с) → к Generator → подать топливо (3с) → обратно")
-ESP:CreateToggle({
+local fuelToggle
+fuelToggle = ESP:CreateToggle({
     Name = "Auto fuel",
     CurrentValue = false,
     Callback = function(v)
@@ -1422,6 +1548,27 @@ ESP:CreateToggle({
         else
             notify("Auto fuel: " .. (v and "ON" or "OFF"), 2)
         end
+    end,
+})
+
+ESP:CreateKeybind({
+    Name = "Бинд Auto fuel",
+    CurrentKeybind = "J",
+    Flag = "RM_BindFuel",
+    Callback = function()
+        fuelToggle:Set(not G.RM_AutoFuel)
+    end,
+})
+
+ESP:CreateSection("Аимбот")
+ESP:CreateLabel("Аимбот на монстра: зажми бинд — камера наводится на ближайшего монстра/мутанта (до 200 м)")
+ESP:CreateKeybind({
+    Name = "Бинд аимбота (зажать)",
+    CurrentKeybind = "C",
+    HoldToInteract = true,
+    Flag = "RM_BindAim",
+    Callback = function(on)
+        G.RM_AimMonster = (on == true)
     end,
 })
 
@@ -1580,4 +1727,4 @@ end)
 
 SettingsTab:CreateLabel("Окно перетаскивается за шапку. Тема сохраняется в конфиге.")
 
-print("[RESIDENCE MASSACRE] v4.1 rayfield loaded | предметы по ClickDetector/Prompt + автозабор | Auto fuel (JerryCan->Generator) | ESP | свет без мерцания | камера 1/3 | Settings")
+print("[RESIDENCE MASSACRE] v4.2 rayfield loaded | бинды + аимбот на монстра + скорость действий + анти-клип при спиде | предметы/автозабор/Auto fuel | ESP | свет | камера 1/3 | Settings")
