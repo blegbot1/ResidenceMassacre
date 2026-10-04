@@ -1,9 +1,10 @@
 -- ============================================================
 --  ELITE HUB | Residence Massacre (Fullbright + TP Speed +
---  Stamina + Mutant ESP)
---  GUI на библиотеке Rayfield (как в Fort Blox).
---  Клиентские свойства Lighting + TP walk + лок стамины +
---  ESP мутанта (Highlight + метка через стены).
+--  Stamina + ESP + автозабор)
+--  GUI на библиотеке Rayfield (как в Fort Blox): Main / ESP / Settings.
+--  Свет каждый кадр без мерцания, камера 1-е/3-е лицо,
+--  ESP игроков/монстров/мутантов/предметов + автозабор предметов
+--  (тепелерт рядом → клик → обратно, сервер видит «стоял рядом»).
 --  Античит НЕ обходим: всё включается вручную и на свой риск.
 --
 --  Repo:   https://github.com/blegbot1/ResidenceMassacre
@@ -26,13 +27,13 @@ if ONLY_PLACE_ID and game.PlaceId ~= ONLY_PLACE_ID then
 end
 
 local G = getgenv()
-G.RM_FB = G.RM_FB ~= nil and G.RM_FB or true          -- fullbright
+G.RM_FB = G.RM_FB ~= nil and G.RM_FB or true          -- fullbright (+ всегда без тумана)
 G.RM_Bright = G.RM_Bright or 3                        -- яркость 0..10
-G.RM_NoFog = G.RM_NoFog ~= nil and G.RM_NoFog or true -- без тумана/теней
-G.RM_Poll = G.RM_Poll or 1                            -- как часто возвращать значения (сек)
 G.RM_TPSpeed = false                                  -- TP walk (ВЫКЛ по умолчанию)
 G.RM_TPSpeedVal = G.RM_TPSpeedVal or 50               -- скорость телепорта, studs/s
 G.RM_StaminaLock = false                              -- infinite stamina (ВЫКЛ по умолчанию)
+G.RM_CamMode = G.RM_CamMode or "game"                 -- камера: game / first / third
+local pickupBusy = false                              -- идёт автозабор (TP walk ждёт)
 
 -- ================= применение =================
 -- пишем свойство ТОЛЬКО если оно реально отличается.
@@ -77,7 +78,6 @@ local function restoreGroup(list)
 end
 
 local function applyLight()
-    -- fullbright (или возврат оригинала)
     if G.RM_FB then
         local b = G.RM_Bright or 3
         setProp(Lighting, "Brightness", b)
@@ -89,19 +89,58 @@ local function applyLight()
         setProp(Lighting, "ExposureCompensation", 0.4)
         setProp(Lighting, "EnvironmentDiffuseScale", 1)
         setProp(Lighting, "EnvironmentSpecularScale", 0)
-    else
-        restoreGroup(BRIGHT)
-    end
-    -- no fog / shadows (или возврат оригинала)
-    if G.RM_NoFog then
+        -- туман и тени всегда убраны, пока fullbright включён
+        -- (отдельной кнопки «No fog» больше нет)
         setProp(Lighting, "GlobalShadows", false)
         setProp(Lighting, "FogStart", -100000)
         setProp(Lighting, "FogEnd", 100000)
         setProp(Lighting, "FogColor", Color3.fromRGB(255, 255, 255))
     else
+        restoreGroup(BRIGHT)
         restoreGroup(FOG)
     end
 end
+
+-- ================= камера: 1-е лицо / 3-е (сзади) =================
+-- "game" — как в игре (трогаем один раз), "first"/"third" — держим
+-- принудительно каждый кадр, перекрывая локи игры.
+local CAM_ORIG = { mode = Enum.CameraMode.Classic, min = 0.5, max = 12.8 }
+pcall(function()
+    CAM_ORIG.mode = LP.CameraMode
+    CAM_ORIG.min = LP.CameraMinZoomDistance
+    CAM_ORIG.max = LP.CameraMaxZoomDistance
+end)
+
+local function camViewName()
+    if G.RM_CamMode == "first" then return "1-е лицо" end
+    if G.RM_CamMode == "third" then return "3-е (сзади)" end
+    return "Как в игре"
+end
+
+local function applyCam()
+    pcall(function()
+        if G.RM_CamMode == "first" then
+            setProp(LP, "CameraMode", Enum.CameraMode.LockFirstPerson)
+        elseif G.RM_CamMode == "third" then
+            setProp(LP, "CameraMode", Enum.CameraMode.Classic)
+            setProp(LP, "CameraMinZoomDistance", 6)
+            setProp(LP, "CameraMaxZoomDistance", 15)
+        else
+            setProp(LP, "CameraMode", CAM_ORIG.mode)
+            setProp(LP, "CameraMinZoomDistance", CAM_ORIG.min)
+            setProp(LP, "CameraMaxZoomDistance", CAM_ORIG.max)
+        end
+    end)
+end
+pcall(applyCam)
+
+-- Свет и камера перепроверяются на КАЖДОМ кадре (запись — только если
+-- что-то реально изменилось). Раньше опрос раз в секунду давал
+-- мерцание: игра успевала вернуть темноту между опросами.
+RunService.RenderStepped:Connect(function()
+    if G.RM_FB then pcall(applyLight) end
+    if G.RM_CamMode ~= "game" then pcall(applyCam) end
+end)
 
 -- ================= TP walk (speed без WalkSpeed) =================
 -- Двигаем HumanoidRootPart телепортами по направлению взгляда.
@@ -123,7 +162,7 @@ local function moveKeys()
 end
 
 RunService.RenderStepped:Connect(function(dt)
-    if not G.RM_TPSpeed then return end
+    if not G.RM_TPSpeed or pickupBusy then return end
     pcall(function()
         local cam = workspace.CurrentCamera
         if not cam then return end
@@ -315,6 +354,24 @@ end)
 -- Красный хайлайт + метка (дистанция и HP) через стены.
 -- Постоянный скан workspace раз в 1с + события
 -- DescendantAdded/Removing на спавн и десавн мутанта.
+-- Общий контейнер ESP: ScreenGui в CoreGui — ESC/очистка PlayerGui
+-- его не трогают, watchdog пересоздаёт при удалении.
+local ESPScreen = nil
+local function ensureESPScreen()
+    pcall(function()
+        if ESPScreen and ESPScreen.Parent then
+            if not ESPScreen.Enabled then ESPScreen.Enabled = true end
+            return
+        end
+        local sg = Instance.new("ScreenGui")
+        sg.Name = "RM_ESP"
+        sg.ResetOnSpawn = false
+        sg.DisplayOrder = 100000
+        sg.Parent = game:GetService("CoreGui")
+        ESPScreen = sg
+    end)
+end
+ensureESPScreen()
 G.RM_MutantESP = G.RM_MutantESP or false
 G.RM_MutantColor = G.RM_MutantColor or Color3.fromRGB(255, 40, 40)
 
@@ -328,7 +385,8 @@ end
 
 local function addMutant(m)
     if inCache[m] or not m.Parent then return end
-    local pg = LP:FindFirstChildOfClass("PlayerGui")
+    ensureESPScreen()
+    local pg = ESPScreen
     if not pg then return end
     inCache[m] = true
 
@@ -411,7 +469,12 @@ RunService.RenderStepped:Connect(function()
         for i = #mutantCache, 1, -1 do
             local e = mutantCache[i]
             local m = e.model
-            if not m or not m.Parent or not isMutantModel(m) then
+            if not e.hl.Parent or not e.gui.Parent then
+                -- хайлайт/метку удалили — убираем из кэша,
+                -- постоянный скан пересоздаст их сам
+                if m then inCache[m] = nil end
+                table.remove(mutantCache, i)
+            elseif not m or not m.Parent or not isMutantModel(m) then
                 -- удалена или переименована — убираем метку и хайлайт
                 pcall(function() e.hl:Destroy() end)
                 pcall(function() e.gui:Destroy() end)
@@ -429,6 +492,421 @@ RunService.RenderStepped:Connect(function()
                         e.gui.Adornee = root
                         show = true
                     end
+                end
+                e.hl.Enabled = show
+                e.gui.Enabled = show
+            end
+        end
+    end)
+end)
+
+-- ================= ESP: игроки / монстры / предметы =================
+-- Второй движок (мутанты ведутся отдельной секцией выше):
+-- Highlight + метка через стены, всё лежит в CoreGui.
+-- Скан workspace раз в 1с + события спавна/десавна.
+-- Предметы ItemSpots: ESP + автозабор (тепелерт → взять → вернуться).
+G.RM_PlayerESP = G.RM_PlayerESP or false
+G.RM_PlayerColor = G.RM_PlayerColor or Color3.fromRGB(80, 255, 120)
+G.RM_MonsterESP = G.RM_MonsterESP or false
+G.RM_MonsterColor = G.RM_MonsterColor or Color3.fromRGB(255, 140, 0)
+G.RM_ItemESP = G.RM_ItemESP or false
+G.RM_ItemColor = G.RM_ItemColor or Color3.fromRGB(255, 220, 60)
+G.RM_AutoPickup = false -- без флага: всегда стартует выключенным
+G.RM_PickList = G.RM_PickList or {"Все"} -- что забирать (сохраняется)
+
+local espCache = {} -- array {inst, kind, hl, gui, lbl, ...}
+local espBy = {} -- Instance -> entry
+local pickDD = nil -- выпадашка «Что забирать» (заполняется при создании GUI)
+
+local function kindColor(kind)
+    if kind == "player" then return G.RM_PlayerColor end
+    if kind == "monster" then return G.RM_MonsterColor end
+    return G.RM_ItemColor
+end
+
+local function kindOn(kind)
+    if kind == "player" then return G.RM_PlayerESP == true end
+    if kind == "monster" then return G.RM_MonsterESP == true end
+    return G.RM_ItemESP == true
+end
+
+-- модель = игрок / монстр / ничего.
+-- Мутанты пропускаются — их ведёт отдельная секция выше.
+local function modelKind(m)
+    if not m:IsA("Model") or not m.Parent then return nil end
+    local plr = Players:GetPlayerFromCharacter(m)
+    if plr then
+        if plr == LP then return nil end
+        return "player"
+    end
+    if not m:FindFirstChildOfClass("Humanoid") then return nil end
+    if string.find(string.lower(m.Name), "mutant", 1, true) then return nil end
+    return "monster"
+end
+
+local function espAdd(inst, kind)
+    if not inst or espBy[inst] then return end
+    ensureESPScreen()
+    local container = ESPScreen
+    if not container then return end
+    local hl = Instance.new("Highlight")
+    hl.Name = "RM_ESP_HL"
+    hl.FillColor = kindColor(kind)
+    hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+    hl.FillTransparency = (kind == "item") and 0.75 or 0.55
+    hl.OutlineTransparency = 0
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Adornee = inst
+    hl.Parent = container
+
+    local gui = Instance.new("BillboardGui")
+    gui.Name = "RM_ESP_LBL"
+    gui.Size = (kind == "item") and UDim2.fromOffset(180, 22) or UDim2.fromOffset(220, 34)
+    gui.AlwaysOnTop = true
+    gui.MaxDistance = 1000000
+    gui.Adornee = inst
+    gui.Parent = container
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Name = "Text"
+    lbl.Size = UDim2.fromScale(1, 1)
+    lbl.BackgroundTransparency = 1
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextColor3 = kindColor(kind)
+    lbl.TextStrokeTransparency = 0
+    lbl.TextSize = (kind == "item") and 12 or 14
+    lbl.Text = ""
+    lbl.Parent = gui
+
+    local e = {inst = inst, kind = kind, hl = hl, gui = gui, lbl = lbl}
+    espCache[#espCache + 1] = e
+    espBy[inst] = e
+end
+
+local function espRemove(inst)
+    local e = espBy[inst]
+    if not e then return end
+    espBy[inst] = nil
+    pcall(function() e.hl:Destroy() end)
+    pcall(function() e.gui:Destroy() end)
+    for i = #espCache, 1, -1 do
+        if espCache[i] == e then
+            table.remove(espCache, i)
+        end
+    end
+end
+
+-- ===== предметы ItemSpots =====
+local itemContainer = nil
+local itemNames = {} -- lowername -> имя для выпадашки
+
+local function refreshItemContainer()
+    if itemContainer and itemContainer.Parent then return end
+    itemContainer = nil
+    pcall(function()
+        itemContainer = workspace:FindFirstChild("ItemSpots")
+        if not itemContainer then
+            for _, d in ipairs(workspace:GetDescendants()) do
+                if d:IsA("Folder") and string.lower(d.Name) == "itemspots" then
+                    itemContainer = d
+                    break
+                end
+            end
+        end
+    end)
+end
+
+-- что лежит в Spot: моделька предмета с Handle + с кем взаимодействовать
+local function itemInfo(spot)
+    local root, name = nil, nil
+    for _, ch in ipairs(spot:GetChildren()) do
+        if ch:IsA("Model") and ch:FindFirstChild("Handle", true) then
+            root, name = ch, ch.Name
+            break
+        end
+    end
+    if not root and spot:FindFirstChild("Handle", true) then
+        root, name = spot, spot.Name
+    end
+    if not root then return nil end
+    local cd = root:FindFirstChildWhichIsA("ClickDetector", true)
+        or spot:FindFirstChildWhichIsA("ClickDetector", true)
+    local prompt = spot:FindFirstChildWhichIsA("ProximityPrompt", true)
+        or root:FindFirstChildWhichIsA("ProximityPrompt", true)
+    local equipRE = spot:FindFirstChildOfClass("RemoteEvent")
+        or root:FindFirstChildOfClass("RemoteEvent")
+    local equipRF = spot:FindFirstChildOfClass("RemoteFunction")
+        or root:FindFirstChildOfClass("RemoteFunction")
+    return {root = root, name = name, cd = cd, prompt = prompt,
+        equipRE = equipRE, equipRF = equipRF}
+end
+
+local function pickOptions()
+    local opts = {"Все"}
+    local names = {}
+    for _, n in pairs(itemNames) do
+        names[#names + 1] = n
+    end
+    table.sort(names, function(a, b)
+        return string.lower(a) < string.lower(b)
+    end)
+    for _, n in ipairs(names) do
+        opts[#opts + 1] = n
+    end
+    return opts
+end
+
+local function scanItems()
+    refreshItemContainer()
+    if not itemContainer then return end
+    local seen = {}
+    local newName = false
+    for _, spot in ipairs(itemContainer:GetChildren()) do
+        if spot:IsA("Model") then
+            local info = itemInfo(spot)
+            if info then
+                seen[info.root] = true
+                local key = string.lower(info.name)
+                if not itemNames[key] then
+                    itemNames[key] = info.name
+                    newName = true
+                end
+                if not espBy[info.root] then espAdd(info.root, "item") end
+                local e = espBy[info.root]
+                if e then
+                    e.itemName = info.name
+                    e.cd = info.cd
+                    e.prompt = info.prompt
+                    e.equipRE = info.equipRE
+                    e.equipRF = info.equipRF
+                end
+            end
+        end
+    end
+    -- предмет исчез (забрали / респавн) — убираем метку
+    local gone = {}
+    for inst, e in pairs(espBy) do
+        if e.kind == "item" and not seen[inst] then
+            gone[#gone + 1] = inst
+        end
+    end
+    for _, inst in ipairs(gone) do
+        espRemove(inst)
+    end
+    -- в выпадашке появились новые имена предметов
+    if newName and pickDD and type(pickDD.Refresh) == "function" then
+        pcall(function() pickDD:Refresh(pickOptions()) end)
+    end
+end
+
+local function scanEsp()
+    -- игроки — напрямую из Players
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP and plr.Character then
+            local c = plr.Character
+            if not espBy[c] then espAdd(c, "player") end
+        end
+    end
+    -- монстры: Model + Humanoid без владельца-игрока
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("Model") and d.Parent then
+            local k = modelKind(d)
+            if k and not espBy[d] then
+                espAdd(d, k)
+            end
+        end
+    end
+    -- удалённые / переименованные (не предметы — их ведёт scanItems)
+    local gone = {}
+    for inst, e in pairs(espBy) do
+        if e.kind ~= "item" then
+            if not inst.Parent or modelKind(inst) ~= e.kind then
+                gone[#gone + 1] = inst
+            end
+        end
+    end
+    for _, inst in ipairs(gone) do
+        espRemove(inst)
+    end
+    scanItems()
+end
+
+-- спавн/десавн — быстрая реакция (без ожидания секундного скана)
+workspace.DescendantAdded:Connect(function(obj)
+    if obj:IsA("Model") then
+        local k = modelKind(obj)
+        if k and not espBy[obj] then espAdd(obj, k) end
+    end
+end)
+workspace.DescendantRemoving:Connect(function(obj)
+    if espBy[obj] then espRemove(obj) end
+end)
+
+pcall(scanEsp)
+task.spawn(function()
+    while true do
+        pcall(scanEsp)
+        task.wait(1)
+    end
+end)
+
+-- ===== автозабор: телепорт рядом → клик → обратно =====
+local fireWarned = false
+
+local function fireItem(e)
+    local fired = false
+    if e.prompt then
+        pcall(function() e.prompt.HoldDuration = 0 end)
+        if typeof(fireproximityprompt) == "function" then
+            pcall(function() fireproximityprompt(e.prompt) end)
+            fired = true
+        end
+    end
+    if e.cd and typeof(fireclickdetector) == "function" then
+        pcall(function() fireclickdetector(e.cd) end)
+        fired = true
+    end
+    if e.equipRE then
+        pcall(function() e.equipRE:FireServer() end)
+        fired = true
+    end
+    if e.equipRF then
+        task.spawn(function()
+            pcall(function() e.equipRF:InvokeServer() end)
+        end)
+        fired = true
+    end
+    if not fired and (e.prompt or e.cd) and not fireWarned then
+        fireWarned = true
+        print("[RM] В экзекуторе нет fireproximityprompt/fireclickdetector — автозабор не сможет кликать предметы")
+    end
+    return fired
+end
+
+local function itemPos(e)
+    local ok, pos = pcall(function() return e.inst:GetPivot().Position end)
+    if ok and typeof(pos) == "Vector3" then return pos end
+    return nil
+end
+
+local function pickSelected(name)
+    if not name then return false end
+    local sel = G.RM_PickList
+    if typeof(sel) == "string" then sel = {sel} end
+    if not sel or #sel == 0 then return false end
+    local ln = string.lower(name)
+    for _, s in ipairs(sel) do
+        local ls = string.lower(tostring(s))
+        if ls == "все" or ls == "all" then return true end
+        if ls == ln then return true end
+    end
+    return false
+end
+
+local function doPickup(e)
+    if pickupBusy then return end
+    local ch = LP.Character
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    if not hrp or not hrp.Parent then return end
+    local pos = itemPos(e)
+    if not pos then return end
+
+    -- радиус активации: самый жёсткий из найденных взаимодействий
+    local maxD = 32
+    if e.prompt then maxD = math.min(maxD, e.prompt.MaxActivationDistance or 10) end
+    if e.cd then maxD = math.min(maxD, e.cd.MaxActivationDistance or 32) end
+    if not e.prompt and not e.cd then maxD = 10 end -- только Remote — держимся ближе
+
+    local dist = (pos - hrp.Position).Magnitude
+    pickupBusy = true
+    local teleported = false
+    local origin = hrp.CFrame
+    pcall(function()
+        if dist > math.max(maxD - 3, 2) then
+            -- телепорт рядом с предметом: для сервера — «игрок стоял рядом»
+            hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+                * (hrp.CFrame - hrp.CFrame.Position)
+            teleported = true
+        end
+    end)
+    if teleported then task.wait(0.15) end -- позиция успевает дойти до сервера
+    pcall(function() fireItem(e) end)
+    if teleported then
+        task.wait(0.1)
+        pcall(function() hrp.CFrame = origin end)
+    end
+    task.wait(0.15)
+    pickupBusy = false
+end
+
+-- раз в 0.4с берём ближайший подходящий предмет из списка
+task.spawn(function()
+    while true do
+        pcall(function()
+            if G.RM_AutoPickup and not pickupBusy then
+                local ch = LP.Character
+                local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local best, bestD = nil, math.huge
+                    for _, e in ipairs(espCache) do
+                        if e.kind == "item" and e.inst.Parent
+                            and (e.prompt or e.cd or e.equipRE or e.equipRF)
+                            and pickSelected(e.itemName) then
+                            local pos = itemPos(e)
+                            if pos then
+                                local d = (pos - hrp.Position).Magnitude
+                                if d < bestD then
+                                    best, bestD = e, d
+                                end
+                            end
+                        end
+                    end
+                    if best then doPickup(best) end
+                end
+            end
+        end)
+        task.wait(0.4)
+    end
+end)
+
+-- ===== рендер меток/хайлайтов каждый кадр =====
+RunService.RenderStepped:Connect(function()
+    pcall(function()
+        local ch = LP.Character
+        local myHRP = ch and ch:FindFirstChild("HumanoidRootPart")
+        for i = #espCache, 1, -1 do
+            local e = espCache[i]
+            local inst = e.inst
+            if not inst or not inst.Parent or not e.hl.Parent then
+                -- инстанс или сам хайлайт удалили — чистим
+                if inst then espBy[inst] = nil end
+                pcall(function() e.hl:Destroy() end)
+                pcall(function() e.gui:Destroy() end)
+                table.remove(espCache, i)
+            else
+                local show = false
+                local pos = nil
+                if e.kind == "item" then
+                    local ok, piv = pcall(function() return inst:GetPivot().Position end)
+                    if ok then pos = piv end
+                else
+                    local root = inst:FindFirstChild("HumanoidRootPart")
+                        or inst:FindFirstChild("Head")
+                    if root then pos = root.Position end
+                end
+                if kindOn(e.kind) and myHRP and pos then
+                    local dist = (pos - myHRP.Position).Magnitude
+                    local color = kindColor(e.kind)
+                    if e.hl.FillColor ~= color then e.hl.FillColor = color end
+                    if e.lbl.TextColor3 ~= color then e.lbl.TextColor3 = color end
+                    if e.kind == "item" then
+                        e.lbl.Text = ("%s [%dm]"):format(e.itemName or inst.Name, math.floor(dist))
+                    else
+                        local hum = inst:FindFirstChildOfClass("Humanoid")
+                        local hp = (hum and hum.Health > 0) and math.floor(hum.Health) or "?"
+                        e.lbl.Text = ("%s [%dm] HP %s"):format(inst.Name, math.floor(dist), tostring(hp))
+                    end
+                    show = true
                 end
                 e.hl.Enabled = show
                 e.gui.Enabled = show
@@ -517,20 +995,72 @@ local Window = Rayfield:CreateWindow({
     KeySystem = false,
 })
 
--- плавный фиолетовый градиент на шапке окна (только фон, без иконок/текста)
-pcall(function()
-    local pg = LP:FindFirstChildOfClass("PlayerGui")
-    if not pg then return end
-    local topbar = nil
-    for _, g in ipairs(pg:GetChildren()) do
-        if g:IsA("ScreenGui") then
-            local m = g:FindFirstChild("Main", true)
-            if m then
-                local tb = m:FindFirstChild("Topbar")
-                if tb then topbar = tb break end
+-- ==== поиск окна Rayfield: CoreGui / gethui() / RobloxGui / PlayerGui ====
+-- Rayfield сам может жить в gethui() или внутри RobloxGui —
+-- обычный обход детей PlayerGui его не находит.
+local CoreGuiSvc = game:GetService("CoreGui")
+local eliteGui = nil
+local eliteWasFound = false
+local eliteLostNotified = false
+
+local function guiIsRayfield(g)
+    if not g:IsA("ScreenGui") then return false end
+    if string.find(string.lower(g.Name), "rayfield", 1, true) then return true end
+    local m = g:FindFirstChild("Main", true)
+    return m ~= nil and m:FindFirstChild("Topbar") ~= nil
+end
+
+local function findEliteGui()
+    local found = nil
+    pcall(function()
+        local containers = {CoreGuiSvc, LP:FindFirstChildOfClass("PlayerGui")}
+        pcall(function()
+            if type(gethui) == "function" then
+                containers[#containers + 1] = gethui()
+            end
+        end)
+        -- мелкий обход (дёшево)
+        for _, c in ipairs(containers) do
+            if c then
+                for _, g in ipairs(c:GetChildren()) do
+                    if guiIsRayfield(g) then
+                        found = g
+                        break
+                    end
+                end
+            end
+            if found then break end
+        end
+        -- глубокий: RobloxGui и папка gethui
+        if not found then
+            for _, c in ipairs(containers) do
+                if c then
+                    for _, g in ipairs(c:GetDescendants()) do
+                        if guiIsRayfield(g) then
+                            found = g
+                            break
+                        end
+                    end
+                end
+                if found then break end
             end
         end
-    end
+    end)
+    eliteGui = found
+end
+
+findEliteGui()
+if eliteGui then
+    eliteWasFound = true
+else
+    print("[RM] Окно Rayfield не найдено — ESC-защита для него не применяется")
+end
+
+-- плавный фиолетовый градиент на шапке окна (только фон, без иконок/текста)
+pcall(function()
+    if not eliteGui then return end
+    local m = eliteGui:FindFirstChild("Main", true)
+    local topbar = m and m:FindFirstChild("Topbar")
     if not topbar then return end
     local targets = {topbar}
     for _, child in ipairs(topbar:GetChildren()) do
@@ -556,59 +1086,32 @@ pcall(function()
 end)
 
 -- ================= защита GUI от ESC =================
--- Игра при ESC выключает/удаляет чужие ScreenGuis в PlayerGui и не
--- возвращает их. Переносим окно в CoreGui, держим DisplayOrder 100000
--- и каждые 0.2с: включаем обратно выключенное, пересоздаём/ищем
--- удалённое.
-local CoreGui = game:GetService("CoreGui")
-local eliteGui = nil
-local eliteWasFound = false
-local eliteLostNotified = false
-
-local function findEliteGui()
+-- Игра при ESC выключает/удаляет чужие ScreenGuis. Держим окно
+-- в CoreGui с DisplayOrder 100000, включаем выключенное,
+-- ищем заново удалённое.
+local function ensureEliteProtection()
+    if not eliteGui or not eliteGui.Parent then return end
     pcall(function()
-        eliteGui = nil
-        -- сначала по имени Rayfield (если видно), потом по структуре Main > Topbar
-        for _, container in ipairs({CoreGui, LP:FindFirstChildOfClass("PlayerGui")}) do
-            if container then
-                for _, g in ipairs(container:GetChildren()) do
-                    if g:IsA("ScreenGui") and string.find(string.lower(g.Name), "rayfield", 1, true) then
-                        eliteGui = g
-                        break
-                    end
-                end
-                if not eliteGui then
-                    for _, g in ipairs(container:GetChildren()) do
-                        if g:IsA("ScreenGui") then
-                            local m = g:FindFirstChild("Main", true)
-                            if m and m:FindFirstChild("Topbar") then
-                                eliteGui = g
-                                break
-                            end
-                        end
-                    end
-                end
-            end
-            if eliteGui then break end
+        if eliteGui.DisplayOrder < 100000 then
+            eliteGui.DisplayOrder = 100000
+        end
+        eliteGui.ResetOnSpawn = false
+        if not eliteGui.Enabled then
+            eliteGui.Enabled = true
+        end
+        if eliteGui.Parent ~= CoreGuiSvc then
+            eliteGui.Parent = CoreGuiSvc
         end
     end)
 end
 
-findEliteGui()
-if eliteGui then
-    eliteWasFound = true
-    pcall(function()
-        eliteGui.Parent = CoreGui
-        eliteGui.DisplayOrder = 100000
-        eliteGui.ResetOnSpawn = false
-    end)
-else
-    print("[RM] Окно Rayfield не найдено — ESC-защита для него не применяется")
-end
+ensureEliteProtection()
 
 task.spawn(function()
     while true do
         pcall(function()
+            -- контейнер ESP: жив? иначе пересоздаём
+            ensureESPScreen()
             -- плашка стамины: живая? иначе пересоздаём
             ensureStatusGui()
             if stamStatusGui and stamStatusGui.Parent then
@@ -621,25 +1124,16 @@ task.spawn(function()
             end
             -- окно Rayfield
             if not eliteGui or not eliteGui.Parent then
-                eliteGui = nil
                 findEliteGui()
                 if eliteGui then
-                    pcall(function() eliteGui.Parent = CoreGui end)
+                    eliteWasFound = true
+                    pcall(ensureEliteProtection)
                 elseif eliteWasFound and not eliteLostNotified then
                     eliteLostNotified = true
                     print("[RM] Окно Rayfield удалили — перезапусти скрипт")
                 end
-            end
-            if eliteGui and eliteGui.Parent then
-                if eliteGui.DisplayOrder < 100000 then
-                    eliteGui.DisplayOrder = 100000
-                end
-                if not eliteGui.Enabled then
-                    eliteGui.Enabled = true
-                end
-                if eliteGui.Parent ~= CoreGui then
-                    pcall(function() eliteGui.Parent = CoreGui end)
-                end
+            else
+                pcall(ensureEliteProtection)
             end
         end)
         task.wait(0.2)
@@ -662,16 +1156,6 @@ Main:CreateToggle({
     end,
 })
 
-Main:CreateToggle({
-    Name = "No fog / shadows",
-    CurrentValue = G.RM_NoFog,
-    Flag = "RM_NoFog",
-    Callback = function(v)
-        G.RM_NoFog = v
-        applyLight()
-    end,
-})
-
 Main:CreateSlider({
     Name = "Brightness",
     Range = {0, 10},
@@ -681,18 +1165,6 @@ Main:CreateSlider({
     Callback = function(v)
         G.RM_Bright = v
         applyLight()
-    end,
-})
-
-Main:CreateSlider({
-    Name = "Check every",
-    Range = {0.1, 5},
-    Increment = 0.1,
-    Suffix = " s",
-    CurrentValue = G.RM_Poll,
-    Flag = "RM_Poll",
-    Callback = function(v)
-        G.RM_Poll = v
     end,
 })
 
@@ -742,8 +1214,47 @@ Main:CreateToggle({
     end,
 })
 
--- ===== Mutant ESP =====
-Main:CreateToggle({
+-- ================= вкладка ESP (весь ESP + автозабор) =================
+local ESP = Window:CreateTab("ESP", 4483362458)
+
+ESP:CreateSection("Игроки")
+ESP:CreateToggle({
+    Name = "Player ESP",
+    CurrentValue = G.RM_PlayerESP,
+    Flag = "RM_PlayerESP",
+    Callback = function(v)
+        G.RM_PlayerESP = v
+        notify("Player ESP: " .. (v and "ON" or "OFF"), 2)
+    end,
+})
+ESP:CreateColorPicker({
+    Name = "Player ESP color",
+    Color = G.RM_PlayerColor,
+    Flag = "RM_PlayerColor",
+    Callback = function(v)
+        G.RM_PlayerColor = v
+    end,
+})
+
+ESP:CreateSection("Монстры")
+ESP:CreateToggle({
+    Name = "Monster ESP",
+    CurrentValue = G.RM_MonsterESP,
+    Flag = "RM_MonsterESP",
+    Callback = function(v)
+        G.RM_MonsterESP = v
+        notify("Monster ESP: " .. (v and "ON" or "OFF"), 2)
+    end,
+})
+ESP:CreateColorPicker({
+    Name = "Monster ESP color",
+    Color = G.RM_MonsterColor,
+    Flag = "RM_MonsterColor",
+    Callback = function(v)
+        G.RM_MonsterColor = v
+    end,
+})
+ESP:CreateToggle({
     Name = "Mutant ESP",
     CurrentValue = G.RM_MutantESP,
     Flag = "RM_MutantESP",
@@ -752,8 +1263,7 @@ Main:CreateToggle({
         notify("Mutant ESP: " .. (v and "ON" or "OFF"), 2)
     end,
 })
-
-Main:CreateColorPicker({
+ESP:CreateColorPicker({
     Name = "Mutant ESP color",
     Color = G.RM_MutantColor,
     Flag = "RM_MutantColor",
@@ -767,8 +1277,48 @@ Main:CreateColorPicker({
         end
     end,
 })
+ESP:CreateLabel("Монстры: модель с Humanoid (не игрок); мутанты — по имени. Метка: имя, дистанция, HP.")
 
-Main:CreateLabel("Mutant ESP: хайлайт и метка HP видны сквозь стены")
+ESP:CreateSection("Предметы")
+ESP:CreateToggle({
+    Name = "Item ESP",
+    CurrentValue = G.RM_ItemESP,
+    Flag = "RM_ItemESP",
+    Callback = function(v)
+        G.RM_ItemESP = v
+        notify("Item ESP: " .. (v and "ON" or "OFF"), 2)
+    end,
+})
+ESP:CreateColorPicker({
+    Name = "Item ESP color",
+    Color = G.RM_ItemColor,
+    Flag = "RM_ItemColor",
+    Callback = function(v)
+        G.RM_ItemColor = v
+    end,
+})
+
+ESP:CreateLabel("Автозабор: телепорт к предмету → взять → обратно. Для сервера — «стоял рядом и забрал».")
+ESP:CreateToggle({
+    Name = "Auto pickup",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_AutoPickup = v
+        notify("Auto pickup: " .. (v and "ON" or "OFF"), 2)
+    end,
+})
+pickDD = ESP:CreateDropdown({
+    Name = "Что забирать",
+    Options = pickOptions(),
+    CurrentOption = G.RM_PickList,
+    MultipleOptions = true,
+    Flag = "RM_PickList",
+    Callback = function(opt)
+        if typeof(opt) == "string" then opt = {opt} end
+        G.RM_PickList = opt or {"Все"}
+    end,
+})
+ESP:CreateLabel("Что забирать: можно выбрать несколько. «Все» = всё подряд.")
 
 -- ================= вкладка Settings (кастомизация темы) =================
 local SettingsTab = Window:CreateTab("Settings", 4483362458)
@@ -779,11 +1329,31 @@ for k, v in pairs(getgenv().RM_Theme) do
     DEFAULT_THEME[k] = v
 end
 
+local themeToken = 0
 local function changeThemeNow()
-    pcall(function()
-        if type(Rayfield.ChangeTheme) == "function" then
-            Rayfield:ChangeTheme(getgenv().RM_Theme)
-        end
+    -- палитру тянем мышью — применяем через 0.2с тишины,
+    -- иначе ModifyTheme шлёт уведомление на каждый шажок пикера
+    themeToken = themeToken + 1
+    local mine = themeToken
+    task.delay(0.2, function()
+        if mine ~= themeToken then return end
+        pcall(function()
+            if type(Window.ModifyTheme) == "function" then
+                Window.ModifyTheme(getgenv().RM_Theme)
+            elseif type(Rayfield.ChangeTheme) == "function" then
+                Rayfield:ChangeTheme(getgenv().RM_Theme)
+            end
+        end)
+        -- элементы Rayfield перекрашиваются только при смене
+        -- BackgroundColor3 у Main — дёргаем его принудительно
+        pcall(function()
+            if not eliteGui then return end
+            local main = eliteGui:FindFirstChild("Main", true)
+            if not main then return end
+            local b = getgenv().RM_Theme.Background
+            main.BackgroundColor3 = Color3.new(math.min(b.R + 0.01, 1), b.G, b.B)
+            main.BackgroundColor3 = b
+        end)
     end)
 end
 
@@ -812,6 +1382,27 @@ local function setThemeKeys(map)
     end
     changeThemeNow()
 end
+
+SettingsTab:CreateSection("Камера")
+SettingsTab:CreateDropdown({
+    Name = "Вид",
+    Options = {"Как в игре", "1-е лицо", "3-е (сзади)"},
+    CurrentOption = {camViewName()},
+    Flag = "RM_CamView",
+    Callback = function(opt)
+        local v = (typeof(opt) == "table") and opt[1] or opt
+        if v == "1-е лицо" then
+            G.RM_CamMode = "first"
+        elseif v == "3-е (сзади)" then
+            G.RM_CamMode = "third"
+        else
+            G.RM_CamMode = "game"
+        end
+        applyCam()
+        notify("Камера: " .. tostring(v), 2)
+    end,
+})
+SettingsTab:CreateLabel("1-е лицо — всегда впереди; 3-е — камера позади; «Как в игре» не трогает камеру.")
 
 SettingsTab:CreateLabel("— Кастомизация темы ELITE HUB —")
 
@@ -884,16 +1475,4 @@ end)
 
 SettingsTab:CreateLabel("Окно перетаскивается за шапку. Тема сохраняется в конфиге.")
 
--- ================= главный цикл =================
--- Опрос раз в секунду: реже = меньше нагрузки и риска кика.
--- setProp пишет только при реальном отличии, в покое нагрузка нулевая.
-task.spawn(function()
-    while true do
-        pcall(applyLight)
-        local poll = G.RM_Poll or 1
-        if poll < 0.1 then poll = 0.1 end
-        task.wait(poll)
-    end
-end)
-
-print("[RESIDENCE MASSACRE] v3.9 rayfield loaded | Settings: кастомизация темы | без рывка вверх при TP Speed | GUI в CoreGui (ESC)")
+print("[RESIDENCE MASSACRE] v4.0 rayfield loaded | ESP: игроки/монстры/предметы + автозабор | свет каждый кадр (без мерцания) | камера 1/3 | Settings")
