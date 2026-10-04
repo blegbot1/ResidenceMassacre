@@ -1,17 +1,12 @@
 -- ============================================================
---  RESIDENCE MASSACRE | Fullbright + Speed
---  Клиентский скрипт под Residence Massacre.
+--  ELITE HUB | Residence Massacre (Fullbright + Speed)
+--  GUI на библиотеке Rayfield (как в Fort Blox).
 --  Только клиентские свойства: Lighting + Humanoid.WalkSpeed.
---  Никакого вмешательства в сервер и обхода защиты.
+--  Античит НЕ обходим: минимальная нагрузка (запись свойств
+--  только при изменении, опрос 1с, Speed выключен по умолчанию).
 --
 --  Repo:   https://github.com/blegbot1/ResidenceMassacre
---  Loader: raw.../refs/heads/main/ResidenceMassacre.lua
 --  Запуск: loadstring(game:HttpGet("https://raw.githubusercontent.com/blegbot1/ResidenceMassacre/refs/heads/main/ResidenceMassacre.lua",true))()
---
---  Ввод двойной: прямой GuiObject.InputBegan на каждой кнопке
---  (как на слайдерах) + глобальный UIS.InputBegan с ручным
---  хит-тестом как запасной путь. Координаты берём из
---  UIS:GetMouseLocation(), а не из input.Position.
 -- ============================================================
 
 -- Place ID Residence Massacre.
@@ -19,7 +14,6 @@
 local ONLY_PLACE_ID = nil
 
 local Players = game:GetService("Players")
-local UIS = game:GetService("UserInputService")
 local Lighting = game:GetService("Lighting")
 local LP = Players.LocalPlayer
 
@@ -29,16 +23,16 @@ if ONLY_PLACE_ID and game.PlaceId ~= ONLY_PLACE_ID then
 end
 
 local G = getgenv()
-G.RM_FB = G.RM_FB or true            -- fullbright
-G.RM_Bright = G.RM_Bright or 3       -- яркость 0..10
-G.RM_NoFog = G.RM_NoFog or true      -- без тумана/теней
-G.RM_SpeedOn = G.RM_SpeedOn or false -- ВЫКЛ по умолчанию: скорость чаще всего триггерит кик
-G.RM_Speed = G.RM_Speed or 50        -- скорость 0..300
-G.RM_Poll = G.RM_Poll or 1           -- как часто возвращать значения (сек)
+G.RM_FB = G.RM_FB ~= nil and G.RM_FB or true      -- fullbright
+G.RM_Bright = G.RM_Bright or 3                    -- яркость 0..10
+G.RM_NoFog = G.RM_NoFog ~= nil and G.RM_NoFog or true -- без тумана/теней
+G.RM_SpeedOn = false                              -- ВЫКЛ по умолчанию (триггер кика)
+G.RM_Speed = G.RM_Speed or 25                     -- скорость 0..300
+G.RM_Poll = G.RM_Poll or 1                        -- как часто возвращать значения (сек)
 
 -- ================= применение =================
 -- пишем свойство ТОЛЬКО если оно реально отличается.
--- постоянные записи -> desync -> кик (Error 267)
+-- постоянные записи -> desync -> кик (Error 267 "Possible exploit")
 local function setProp(obj, name, value)
     pcall(function()
         local cur = obj[name]
@@ -79,7 +73,7 @@ local function applySpeed()
     local ch = LP.Character
     local hum = ch and ch:FindFirstChildOfClass("Humanoid")
     if hum and hum.Parent then
-        setProp(hum, "WalkSpeed", G.RM_Speed or 50)
+        setProp(hum, "WalkSpeed", G.RM_Speed or 25)
     end
 end
 
@@ -88,318 +82,216 @@ LP.CharacterAdded:Connect(function()
     applySpeed()
 end)
 
--- ================= интерфейс =================
-local BG = Color3.fromRGB(18, 14, 28)
-local EL = Color3.fromRGB(26, 20, 40)
-local HOVER = Color3.fromRGB(38, 28, 58)
-local PURPLE = Color3.fromRGB(150, 90, 235)
-local DIM = Color3.fromRGB(120, 115, 135)
-local TEXT = Color3.fromRGB(235, 230, 245)
-
-local gui = Instance.new("ScreenGui")
-gui.Name = "ResidenceMassacreTool"
-gui.ResetOnSpawn = false
-gui.DisplayOrder = 999          -- поверх игрового UI
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-gui.Parent = LP:WaitForChild("PlayerGui")
-
-local panel = Instance.new("Frame")
-panel.Name = "Panel"
-panel.Size = UDim2.fromOffset(250, 250)
-panel.Position = UDim2.fromOffset(20, 20)
-panel.BackgroundColor3 = BG
-panel.BorderSizePixel = 0
-panel.Active = true
-panel.Parent = gui
-Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
-local stroke = Instance.new("UIStroke", panel)
-stroke.Color = PURPLE
-stroke.Thickness = 1
-stroke.Transparency = 0.4
-
-local function mkLabel(parent, text, size)
-    local l = Instance.new("TextLabel")
-    l.Text = text
-    l.Size = size
-    l.BackgroundTransparency = 1
-    l.Font = Enum.Font.GothamSemibold
-    l.TextColor3 = TEXT
-    l.TextXAlignment = Enum.TextXAlignment.Left
-    l.Active = false
-    l.Parent = parent
-    return l
-end
-
-local title = mkLabel(panel, "RESIDENCE MASSACRE | Fullbright", UDim2.new(1, -20, 0, 24))
-title.Position = UDim2.fromOffset(10, 6)
-title.TextSize = 15
-
--- всё кликабельное регистрируется тут: {rect(), onClick()}
-local buttons = {}
-local sliders = {}
-local TITLE_H = 26
-
-local function inRect(p, pos, size)
-    return p.X >= pos.X and p.X <= pos.X + size.X and p.Y >= pos.Y and p.Y <= pos.Y + size.Y
-end
-
--- защита от двойного срабатывания, когда один клик ловят
--- сразу два пути ввода (GuiObject.InputBegan + UIS.InputBegan)
-local lastClickAt = 0
-local function clickGuard()
-    local now = os.clock()
-    if now - lastClickAt < 0.12 then return false end
-    lastClickAt = now
-    return true
-end
-
-local function isDownType(t)
-    return t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch
-end
-
--- надёжные координаты мыши: GetMouseLocation() согласован
--- с AbsolutePosition (у input.Position бывают расхождения с инсетами)
-local function mousePos(input)
-    local ok, mp = pcall(function() return UIS:GetMouseLocation() end)
-    if ok and mp then return mp end
-    if input then return input.Position end
-    return Vector2.zero
-end
-
-local function mkToggle(y, text, flag)
-    local holder = Instance.new("Frame")
-    holder.Size = UDim2.new(1, -20, 0, 26)
-    holder.Position = UDim2.fromOffset(10, y)
-    holder.BackgroundColor3 = BG
-    holder.BorderSizePixel = 0
-    holder.Active = true
-    holder.Parent = panel
-    Instance.new("UICorner", holder).CornerRadius = UDim.new(0, 6)
-
-    local lbl = mkLabel(holder, text, UDim2.new(1, -60, 1, 0))
-    lbl.Position = UDim2.fromOffset(8, 0)
-    lbl.TextSize = 13
-
-    local state = mkLabel(holder, "", UDim2.new(0, 44, 1, 0))
-    state.Position = UDim2.new(1, -52, 0, 0)
-    state.TextXAlignment = Enum.TextXAlignment.Right
-    state.TextSize = 13
-
-    local function paint()
-        local on = G[flag]
-        state.Text = on and "ON" or "OFF"
-        state.TextColor3 = on and PURPLE or DIM
-        holder.BackgroundColor3 = on and EL or BG
+-- ================= Rayfield =================
+local Rayfield = nil
+local rayUrls = {
+    "https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/main/source.lua",
+    "https://sirius.menu/rayfield",
+}
+for _, u in ipairs(rayUrls) do
+    local ok, res = pcall(function()
+        return loadstring(game:HttpGet(u, true))()
+    end)
+    if ok and type(res) == "table" and res.CreateWindow then
+        Rayfield = res
+        break
     end
+end
+if not Rayfield then
+    warn("[RM] Rayfield не загрузился — проверь интернет/экзекутор (httpget должен быть разрешён)")
+    return
+end
 
-    local function doToggle()
-        if not clickGuard() then return end
-        G[flag] = not G[flag]
-        paint()
+-- ================= ELITE HUB theme (black / purple) =================
+-- та же таблица темы, что и в Fort Blox — Rayfield принимает её как есть
+getgenv().RM_Theme = {
+    TextColor = Color3.fromRGB(235, 230, 245),
+
+    Background = Color3.fromRGB(12, 10, 18),
+    Topbar = Color3.fromRGB(20, 16, 30),
+    Shadow = Color3.fromRGB(5, 4, 10),
+
+    NotificationBackground = Color3.fromRGB(22, 18, 34),
+    NotificationActionsBackground = Color3.fromRGB(190, 160, 230),
+
+    TabBackground = Color3.fromRGB(30, 24, 44),
+    TabStroke = Color3.fromRGB(60, 44, 90),
+    TabBackgroundSelected = Color3.fromRGB(138, 84, 220),
+    TabTextColor = Color3.fromRGB(200, 190, 220),
+    SelectedTabTextColor = Color3.fromRGB(255, 255, 255),
+
+    ElementBackground = Color3.fromRGB(24, 20, 36),
+    ElementBackgroundHover = Color3.fromRGB(36, 30, 54),
+    SecondaryElementBackground = Color3.fromRGB(18, 15, 28),
+    ElementStroke = Color3.fromRGB(52, 40, 74),
+    SecondaryElementStroke = Color3.fromRGB(44, 34, 64),
+
+    SliderBackground = Color3.fromRGB(60, 44, 90),
+    SliderProgress = Color3.fromRGB(150, 90, 235),
+    SliderStroke = Color3.fromRGB(170, 110, 245),
+
+    ToggleBackground = Color3.fromRGB(30, 24, 44),
+    ToggleEnabled = Color3.fromRGB(150, 90, 235),
+    ToggleDisabled = Color3.fromRGB(70, 55, 90),
+    ToggleEnabledStroke = Color3.fromRGB(180, 130, 250),
+    ToggleDisabledStroke = Color3.fromRGB(100, 80, 125),
+    ToggleEnabledOuterStroke = Color3.fromRGB(110, 70, 160),
+    ToggleDisabledOuterStroke = Color3.fromRGB(60, 48, 80),
+
+    DropdownSelected = Color3.fromRGB(44, 34, 66),
+    DropdownUnselected = Color3.fromRGB(22, 18, 34),
+
+    InputBackground = Color3.fromRGB(22, 18, 34),
+    InputStroke = Color3.fromRGB(70, 52, 100),
+    PlaceholderColor = Color3.fromRGB(120, 105, 150),
+}
+local ELITE = getgenv().RM_Theme
+
+local function notify(text, dur)
+    pcall(function()
+        Rayfield:Notify({ Title = "ELITE HUB", Content = text, Duration = dur or 3 })
+    end)
+end
+
+local Window = Rayfield:CreateWindow({
+    Name = "ELITE HUB | Residence Massacre",
+    LoadingTitle = "ELITE HUB",
+    LoadingSubtitle = "Residence Massacre | Fullbright + Speed",
+    Theme = ELITE,
+    ConfigurationSaving = { Enabled = true, FolderName = "RMScripts", FileName = "ResidenceMassacre" },
+    KeySystem = false,
+})
+
+-- плавный фиолетовый градиент на шапке окна (только фон, без иконок/текста)
+pcall(function()
+    local pg = LP:FindFirstChildOfClass("PlayerGui")
+    if not pg then return end
+    local topbar = nil
+    for _, g in ipairs(pg:GetChildren()) do
+        if g:IsA("ScreenGui") then
+            local m = g:FindFirstChild("Main", true)
+            if m then
+                local tb = m:FindFirstChild("Topbar")
+                if tb then topbar = tb break end
+            end
+        end
+    end
+    if not topbar then return end
+    local targets = {topbar}
+    for _, child in ipairs(topbar:GetChildren()) do
+        -- только обычные контейнеры-фреймы (пропускаем кнопки/иконки/текст/поиск)
+        if child:IsA("Frame") and child.Name ~= "Search" and not child:FindFirstChildWhichIsA("GuiObject", true) then
+            targets[#targets + 1] = child
+        end
+    end
+    for _, d in ipairs(targets) do
+        if d:IsA("Frame") and not d:FindFirstChildOfClass("UIGradient") then
+            local g = Instance.new("UIGradient")
+            g.Name = "EliteGradient"
+            g.Color = ColorSequence.new({
+                ColorSequenceKeypoint.new(0, Color3.fromRGB(150, 90, 235)),
+                ColorSequenceKeypoint.new(0.5, Color3.fromRGB(105, 55, 190)),
+                ColorSequenceKeypoint.new(1, Color3.fromRGB(45, 25, 75)),
+            })
+            g.Rotation = 0
+            pcall(function() d.BackgroundTransparency = 0 end)
+            g.Parent = d
+        end
+    end
+end)
+
+-- ================= вкладка =================
+local Main = Window:CreateTab("Main", 4483362458)
+
+Main:CreateLabel("Fullbright + Speed | клиентские свойства | без обхода античита")
+
+Main:CreateToggle({
+    Name = "Fullbright",
+    CurrentValue = G.RM_FB,
+    Flag = "RM_FB",
+    Callback = function(v)
+        G.RM_FB = v
         applyLight()
-        applySpeed()
-        -- фидбек: мигаем фиолетовым, чтобы было видно, что клик дошёл
-        coroutine.wrap(function()
-            holder.BackgroundColor3 = PURPLE
-            task.wait(0.09)
-            paint()
-        end)()
-    end
+    end,
+})
 
-    buttons[#buttons + 1] = {
-        get = function() return holder.AbsolutePosition, holder.AbsoluteSize end,
-        cb = doToggle,
-        hover = function(on) holder.BackgroundColor3 = on and HOVER or (G[flag] and EL or BG) end,
-    }
-
-    -- путь 1: прямой ивент на самой кнопке (как у рабочих слайдеров)
-    holder.InputBegan:Connect(function(inp)
-        if isDownType(inp.UserInputType) then
-            doToggle()
-        end
-    end)
-
-    paint()
-end
-
-mkToggle(34, "Fullbright", "RM_FB")
-mkToggle(64, "No fog / shadows", "RM_NoFog")
-mkToggle(94, "Speed hack", "RM_SpeedOn")
-
-local function mkSlider(y, text, flag, min, max, step, stepTxt)
-    local holder = Instance.new("Frame")
-    holder.Size = UDim2.new(1, -20, 0, 34)
-    holder.Position = UDim2.fromOffset(10, y)
-    holder.BackgroundTransparency = 1
-    holder.Parent = panel
-
-    local lbl = mkLabel(holder, text, UDim2.new(0.6, 0, 0, 16))
-    lbl.Position = UDim2.fromOffset(0, 0)
-    lbl.TextSize = 13
-
-    local val = mkLabel(holder, "", UDim2.new(0.4, 0, 0, 16))
-    val.Position = UDim2.new(0.6, 0, 0, 0)
-    val.TextXAlignment = Enum.TextXAlignment.Right
-    val.TextSize = 13
-    val.TextColor3 = PURPLE
-
-    local bar = Instance.new("Frame")
-    bar.Size = UDim2.new(1, 0, 0, 10)
-    bar.Position = UDim2.fromOffset(0, 20)
-    bar.BackgroundColor3 = EL
-    bar.BorderSizePixel = 0
-    bar.Active = true
-    bar.Parent = holder
-    Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
-
-    local fill = Instance.new("Frame")
-    fill.Name = "Fill"
-    fill.Size = UDim2.fromScale(0, 1)
-    fill.BackgroundColor3 = PURPLE
-    fill.BorderSizePixel = 0
-    fill.Parent = bar
-    Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
-
-    local function paint()
-        local v = G[flag]
-        val.Text = tostring(v) .. (stepTxt or "")
-        fill.Size = UDim2.fromScale(math.clamp((v - min) / (max - min), 0, 1), 1)
-    end
-
-    local function setFromX(x)
-        local size = bar.AbsoluteSize.X
-        if size <= 0 then return end
-        local frac = math.clamp((x - bar.AbsolutePosition.X) / size, 0, 1)
-        local v = min + (max - min) * frac
-        v = math.floor(v / step + 0.5) * step
-        G[flag] = v
-        paint()
+Main:CreateToggle({
+    Name = "No fog / shadows",
+    CurrentValue = G.RM_NoFog,
+    Flag = "RM_NoFog",
+    Callback = function(v)
+        G.RM_NoFog = v
         applyLight()
+    end,
+})
+
+-- БЕЗ флага: SpeedOn не сохраняется в конфиг и всегда стартует выключенным
+Main:CreateToggle({
+    Name = "Speed hack",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_SpeedOn = v
         applySpeed()
-    end
-
-    local s = {
-        get = function() return bar.AbsolutePosition, bar.AbsoluteSize end,
-        onDown = function(p) setFromX(p.X) end,
-        onMove = function(p) setFromX(p.X) end,
-    }
-    sliders[#sliders + 1] = s
-
-    -- путь 1: прямой ивент на полосе слайдера
-    bar.InputBegan:Connect(function(inp)
-        if isDownType(inp.UserInputType) then
-            draggingSlider = s
-            s.onDown(mousePos(inp))
+        if v then
+            notify("Speed ON — включай 20–25 и без рывков, иначе кик", 5)
+        else
+            notify("Speed OFF", 2)
         end
-    end)
+    end,
+})
 
-    paint()
-end
+Main:CreateSlider({
+    Name = "Brightness",
+    Range = {0, 10},
+    Increment = 0.5,
+    CurrentValue = G.RM_Bright,
+    Flag = "RM_Bright",
+    Callback = function(v)
+        G.RM_Bright = v
+        applyLight()
+    end,
+})
 
-mkSlider(126, "Brightness", "RM_Bright", 0, 10, 0.5, "")
-mkSlider(166, "Speed", "RM_Speed", 0, 300, 1, " st")
-mkSlider(206, "Check every", "RM_Poll", 0.1, 5, 0.1, " s")
+Main:CreateSlider({
+    Name = "Speed",
+    Range = {0, 300},
+    Increment = 1,
+    Suffix = " st",
+    CurrentValue = G.RM_Speed,
+    Flag = "RM_Speed",
+    Callback = function(v)
+        G.RM_Speed = v
+        applySpeed()
+    end,
+})
 
--- ================= ввод (ручной хит-тест) =================
-local draggingPanel = false
-local draggingSlider = nil
-local dragOff = Vector2.new(0, 0)
-local hoverBtn = nil
+Main:CreateSlider({
+    Name = "Check every",
+    Range = {0.1, 5},
+    Increment = 0.1,
+    Suffix = " s",
+    CurrentValue = G.RM_Poll,
+    Flag = "RM_Poll",
+    Callback = function(v)
+        G.RM_Poll = v
+    end,
+})
 
-local function isDown(input)
-    return isDownType(input.UserInputType)
-end
-
-UIS.InputBegan:Connect(function(input, processed)
-    pcall(function()
-        -- НЕ проверяем processed: игра помечает клик как обработанный своим UI,
-        -- но нам всё равно нужно обработать его
-        if not isDown(input) then return end
-        local p = mousePos(input)
-        if not inRect(p, panel.AbsolutePosition, panel.AbsoluteSize) then return end
-
-        -- слайдер?
-        for _, s in ipairs(sliders) do
-            local pos, size = s.get()
-            if inRect(p, pos, size) then
-                draggingSlider = s
-                s.onDown(p)
-                return
-            end
-        end
-
-        -- кнопка?
-        for _, b in ipairs(buttons) do
-            local pos, size = b.get()
-            if inRect(p, pos, size) then
-                b.cb()
-                return
-            end
-        end
-
-        -- иначе тянем окно за шапку
-        if p.Y <= panel.AbsolutePosition.Y + TITLE_H then
-            draggingPanel = true
-            dragOff = Vector2.new(p.X - panel.AbsolutePosition.X, p.Y - panel.AbsolutePosition.Y)
-        end
-    end)
-end)
-
-UIS.InputMoved:Connect(function(input)
-    pcall(function()
-        local p = mousePos(input)
-        if draggingSlider then
-            draggingSlider.onMove(p)
-            return
-        end
-        if draggingPanel then
-            panel.Position = UDim2.new(0, p.X - dragOff.X, 0, p.Y - dragOff.Y)
-            return
-        end
-        -- подсветка кнопки под курсором
-        local inside = inRect(p, panel.AbsolutePosition, panel.AbsoluteSize)
-        local newHover = nil
-        if inside then
-            for i, b in ipairs(buttons) do
-                local pos, size = b.get()
-                if inRect(p, pos, size) then
-                    newHover = i
-                    break
-                end
-            end
-        end
-        if newHover ~= hoverBtn then
-            if hoverBtn and buttons[hoverBtn] and buttons[hoverBtn].hover then
-                buttons[hoverBtn].hover(false)
-            end
-            hoverBtn = newHover
-            if hoverBtn and buttons[hoverBtn].hover then
-                buttons[hoverBtn].hover(true)
-            end
-        end
-    end)
-end)
-
-UIS.InputEnded:Connect(function(input)
-    pcall(function()
-        if isDown(input) then
-            draggingPanel = false
-            draggingSlider = nil
-        end
-    end)
-end)
+Main:CreateLabel("Speed выключен по умолчанию: частые записи WalkSpeed триггерят Error 267")
 
 -- ================= главный цикл =================
 -- Опрос раз в секунду: реже = меньше нагрузки и риска кика.
 -- setProp пишет только при реальном отличии, в покое нагрузка нулевая.
 task.spawn(function()
     while true do
-        applyLight()
-        applySpeed()
+        pcall(function()
+            applyLight()
+            applySpeed()
+        end)
         local poll = G.RM_Poll or 1
         if poll < 0.1 then poll = 0.1 end
         task.wait(poll)
     end
 end)
 
-print("[RESIDENCE MASSACRE] v1.1 dual-input loaded | кнопки мигают при клике | drag = move window")
+print("[RESIDENCE MASSACRE] v2.0 rayfield loaded | окно ELITE HUB | Fullbright включён, Speed выключен")
