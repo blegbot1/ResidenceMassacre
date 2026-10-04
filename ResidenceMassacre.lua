@@ -501,6 +501,36 @@ task.spawn(function()
     end
 end)
 
+-- ===== Anti-Freeze: не замерзать (значения Temperature/Freeze) =====
+-- Как стамина: пишем ТОЛЬКО при отличии — постоянные записи дают
+-- десинк и кик (Error 267). Константы из рабочего RM Helper.
+G.RM_AntiFreeze = false -- без флага: всегда стартует выключенным
+task.spawn(function()
+    while true do
+        if getgenv().RM_Run ~= RUN_ID then return end
+        if G.RM_AntiFreeze then
+            pcall(function()
+                local ch = LP.Character
+                if ch then
+                    local t = ch:FindFirstChild("Temperature", true)
+                    if t and typeof(t.Value) == "number" and t.Value ~= 20 then
+                        t.Value = 20
+                    end
+                    local f = ch:FindFirstChild("Freeze", true)
+                    if f and typeof(f.Value) == "number" and f.Value ~= 0 then
+                        f.Value = 0
+                    end
+                end
+            end)
+        end
+        task.wait(0.5)
+    end
+end)
+
+-- Noclip: подключается тоглом в GUI (здесь только состояние)
+G.RM_Noclip = false
+local noclipConn = nil
+
 -- ================= Mutant ESP =================
 -- Красный хайлайт + метка (дистанция и HP) через стены.
 -- Постоянный скан workspace раз в 1с + события
@@ -2015,6 +2045,72 @@ PlayerTab:CreateKeybind({
     end,
 })
 
+PlayerTab:CreateSection("Температура")
+local freezeToggle
+freezeToggle = PlayerTab:CreateToggle({
+    Name = "Anti-Freeze",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_AntiFreeze = v
+        notify("Anti-Freeze: " .. (v and "ON" or "OFF"), 2)
+    end,
+})
+PlayerTab:CreateKeybind({
+    Name = "Бинд Anti-Freeze",
+    CurrentKeybind = "M",
+    Flag = "RM_BindFreeze",
+    Callback = function()
+        freezeToggle:Set(not G.RM_AntiFreeze)
+    end,
+})
+
+PlayerTab:CreateSection("Noclip")
+local noclipToggle
+noclipToggle = PlayerTab:CreateToggle({
+    Name = "Noclip",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_Noclip = v
+        if v then
+            noclipConn = RunService.Stepped:Connect(function()
+                if getgenv().RM_Run ~= RUN_ID then return end
+                pcall(function()
+                    local ch = LP.Character
+                    if ch then
+                        for _, p in ipairs(ch:GetDescendants()) do
+                            if p:IsA("BasePart") and p.CanCollide then
+                                p.CanCollide = false
+                            end
+                        end
+                    end
+                end)
+            end)
+            notify("Noclip ON — идёшь сквозь стены", 2)
+        else
+            if noclipConn then noclipConn:Disconnect() noclipConn = nil end
+            pcall(function()
+                local ch = LP.Character
+                if ch then
+                    for _, p in ipairs(ch:GetDescendants()) do
+                        if p:IsA("BasePart") and p.CanCollide == false then
+                            p.CanCollide = true
+                        end
+                    end
+                end
+            end)
+            notify("Noclip OFF", 2)
+        end
+    end,
+})
+PlayerTab:CreateKeybind({
+    Name = "Бинд Noclip",
+    CurrentKeybind = "F",
+    Flag = "RM_BindNoclip",
+    Callback = function()
+        noclipToggle:Set(not G.RM_Noclip)
+    end,
+})
+
 PlayerTab:CreateSection("Автозабор")
 -- без флага: всегда стартует с дефолта 0.1с; слайдер опускается до 0.03
 PlayerTab:CreateSlider({
@@ -2164,6 +2260,149 @@ Night3:CreateKeybind({
         G.RM_AimMonster = (on == true)
     end,
 })
+
+-- ================= вкладка ТП: точки из RM Helper =================
+-- Координаты/имена объектов — из RM Helper (rawscripts). Летим
+-- плавно через общий smoothTP (не рывком, как у них).
+local TPTab = Window:CreateTab("ТП", 4483362458)
+
+local function tpToPoint(cf)
+    local ch = LP.Character
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        notify("ТП: нет персонажа", 2)
+        return
+    end
+    pcall(function() smoothTP(hrp, cf) end)
+end
+
+local function tpToNames(names, offset)
+    offset = offset or Vector3.new(0, 5, 4)
+    for _, name in ipairs(names) do
+        local o = workspace:FindFirstChild(name)
+        if o then
+            local pos = nil
+            pcall(function()
+                if o:IsA("Model") and o.PrimaryPart then
+                    pos = o.PrimaryPart.Position
+                elseif o:IsA("BasePart") then
+                    pos = o.Position
+                else
+                    local h = o:FindFirstChild("Handle")
+                    if h then pos = h.Position end
+                end
+            end)
+            if pos then
+                tpToPoint(CFrame.new(pos + offset))
+                return
+            end
+        end
+    end
+    notify("ТП: не нашёл «" .. tostring(names[1]) .. "»", 3)
+end
+
+local function tpBtn(title, cf)
+    TPTab:CreateButton({
+        Name = title,
+        Callback = function() tpToPoint(cf) end,
+    })
+end
+local function tpBtnNames(title, names, offset)
+    TPTab:CreateButton({
+        Name = title,
+        Callback = function() tpToNames(names, offset) end,
+    })
+end
+
+-- координаты (из RM Helper): дом и фабрика
+local LOC = {
+    home     = CFrame.new(-34.18, 9.54, -47.09),
+    living   = CFrame.new(-30.45, 9.54, -48.73),
+    bedroom  = CFrame.new(-26.48, 25.29, -70.10),
+    bathroom = CFrame.new(-30.76, 25.26, -52.87),
+    floor2   = CFrame.new(-3.90, 25.29, -71.19),
+    ladder   = CFrame.new(-0.17, 9.29, -81.32),
+    power    = CFrame.new(-1.48, 6.19, -95.05),
+    oxygen   = CFrame.new(-79.69, 6.29, -127.54),
+    elec     = CFrame.new(-79.09, 6.17, -132.72),
+    safe1    = CFrame.new(-79.71, 21.27, -124.94),
+    safe2    = CFrame.new(-15.41, 25.29, -53.18),
+    n2stor   = CFrame.new(-73.50, 6.17, -125.30),
+    n2tower  = CFrame.new(-95.80, 6.17, -100.50),
+    n2office = CFrame.new(-60.30, 6.17, -110.40),
+    sn2      = CFrame.new(-78.81, 19.27, -134.28),
+}
+
+TPTab:CreateSection("Ночь 1 — дом")
+tpBtn("Дом (спавн)", LOC.home)
+tpBtn("Гостиная", LOC.living)
+tpBtn("Спальня", LOC.bedroom)
+tpBtn("Ванная", LOC.bathroom)
+tpBtn("Этаж 2", LOC.floor2)
+tpBtn("Лестница", LOC.ladder)
+
+TPTab:CreateSection("Ночь 1 — цели")
+tpBtn("Пульт питания", LOC.power)
+tpBtn("Кислородный генератор", LOC.oxygen)
+tpBtn("Электрогенератор", LOC.elec)
+
+TPTab:CreateSection("Ночь 1 — укрытия")
+tpBtn("Укрытие 1 (крыша)", LOC.safe1)
+tpBtn("Укрытие 2 (спальня)", LOC.safe2)
+
+TPTab:CreateSection("Ночь 2 — завод")
+tpBtn("Генератор (Ночь 2)", LOC.elec) -- их n2gen = те же координаты
+tpBtn("Склад питания", LOC.n2stor)
+tpBtn("Радиовышка", LOC.n2tower)
+tpBtn("Офис", LOC.n2office)
+
+TPTab:CreateSection("Ночь 2 — укрытие")
+tpBtn("Укрытие (Ночь 2)", LOC.sn2)
+
+TPTab:CreateSection("Ночь 3 — лагерь")
+tpBtnNames("Лодж", {"Lodge", "MainLodge"}, Vector3.new(0, 5, 10))
+tpBtnNames("Коттедж 1", {"Cabin1", "Cabin_1"})
+tpBtnNames("Коттедж 2", {"Cabin2", "Cabin_2"})
+tpBtnNames("Коттедж 3", {"Cabin3", "Cabin_3"})
+tpBtnNames("Коттедж 4", {"Cabin4", "Cabin_4"})
+tpBtnNames("Бункер", {"Bunker", "BunkerDoor"}, Vector3.new(0, 5, 10))
+tpBtnNames("Костёр", {"Campfire", "Fireplace"})
+
+TPTab:CreateSection("Ночь 3 — предметы")
+tpBtnNames("Канистра", {"JerryCan", "GasCan"}, Vector3.new(0, 3, 3))
+tpBtnNames("Дробовик", {"Shotgun"}, Vector3.new(0, 3, 3))
+tpBtnNames("Патроны", {"Shell", "ShotgunShell"}, Vector3.new(0, 3, 3))
+tpBtnNames("Bloxy Cola", {"BloxyCola"}, Vector3.new(0, 3, 3))
+tpBtnNames("Мармеладка", {"Marshmallow"}, Vector3.new(0, 3, 3))
+tpBtnNames("Фотоловушка", {"TrailCamera"}, Vector3.new(0, 3, 3))
+tpBtnNames("Батарейка", {"Battery"}, Vector3.new(0, 3, 3))
+
+TPTab:CreateSection("Ночь 3 — укрытие")
+tpBtn("Укрытие (Ночь 3)", LOC.safe1)
+
+TPTab:CreateSection("Spirit")
+tpBtnNames("Кровать (спрятаться)", {"Bed", "PlayerBed"}, Vector3.new(0, 5, -6))
+tpBtnNames("Лампа", {"Lamp", "LightSwitch"}, Vector3.new(0, 5, 3))
+tpBtnNames("Шкаф", {"Closet", "Wardrobe"}, Vector3.new(0, 5, 3))
+tpBtnNames("Мишка", {"Bear", "TeddyBear", "Teddy"}, Vector3.new(0, 5, 3))
+tpBtnNames("Стол / часы", {"Desk", "Clock", "AlarmClock"}, Vector3.new(0, 5, 3))
+tpBtnNames("Вентиляция", {"Vent", "AirVent"}, Vector3.new(0, 5, 3))
+tpBtnNames("Приставка", {"Console", "GameConsole"}, Vector3.new(0, 5, 3))
+
+TPTab:CreateSection("Mansion")
+tpBtnNames("Чаша с конфетами", {"CandyBowl", "Bowl"}, Vector3.new(0, 5, 3))
+tpBtnNames("Напольные часы", {"GrandfatherClock", "Clock"}, Vector3.new(0, 5, 3))
+tpBtnNames("Камин", {"Fireplace"}, Vector3.new(0, 5, 5))
+tpBtnNames("Подвал", {"Basement", "BasementDoor"}, Vector3.new(0, 5, 5))
+tpBtnNames("Кухня", {"Kitchen"}, Vector3.new(0, 5, 5))
+tpBtnNames("Столовая", {"DiningRoom", "Dining"}, Vector3.new(0, 5, 5))
+tpBtnNames("Гостевая", {"GuestBedroom", "GuestRoom"}, Vector3.new(0, 5, 5))
+tpBtnNames("Серая комната", {"GreyBedroom", "GreyRoom"}, Vector3.new(0, 5, 5))
+tpBtnNames("Жёлтая комната", {"YellowRoom", "Catwalk"}, Vector3.new(0, 5, 5))
+
+TPTab:CreateSection("Bunker")
+tpBtnNames("Вход", {"Bunker", "BunkerDoor"}, Vector3.new(0, 5, 10))
+tpBtnNames("Внутри", {"BunkerInside", "BunkerRoom"}, Vector3.new(0, 5, 5))
 
 -- ================= вкладка ESP (только ESP) =================
 local ESP = Window:CreateTab("ESP", 4483362458)
@@ -2399,4 +2638,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.12 rayfield loaded | Ночь 2 = Auto PowerCell (капсула → генератор, бинд K) | Ночь 1 = генератор+электрика, Ночь 3 = аимбот | быстрые твины/кулдауны | страховка pickupBusy | отладка электрики | вкладка Игрок | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.13 rayfield loaded | ТП-вкладка (50 точек из RM Helper) | Anti-Freeze + Noclip (бинды M/F) | Ночь 2 = Auto PowerCell | Ночь 1 = генератор+электрика, Ночь 3 = аимбот | быстрые твины/кулдауны | страховка pickupBusy | вкладка Игрок | ESP | Settings")
