@@ -1,10 +1,11 @@
 -- ============================================================
---  ELITE HUB | Residence Massacre (Fullbright)
+--  ELITE HUB | Residence Massacre (Fullbright + TP Speed)
 --  GUI на библиотеке Rayfield (как в Fort Blox).
---  Только клиентские свойства Lighting — серверная проверка
---  скорости кикает сходу, поэтому Speed убран.
---  Античит НЕ обходим: запись свойств только при изменении,
---  опрос 1с, в покое нагрузка нулевая.
+--  Клиентские свойства Lighting + перемещение персонажа
+--  телепортом корпуса (TP walk) — WalkSpeed НЕ трогаем, сервер
+--  видит телепорт позиции, а не скорость.
+--  Античит НЕ обходим: полный bright без спама записей,
+--  скорость-телепорт включается вручную и на свой риск.
 --
 --  Repo:   https://github.com/blegbot1/ResidenceMassacre
 --  Запуск: loadstring(game:HttpGet("https://raw.githubusercontent.com/blegbot1/ResidenceMassacre/refs/heads/main/ResidenceMassacre.lua",true))()
@@ -16,6 +17,8 @@ local ONLY_PLACE_ID = nil
 
 local Players = game:GetService("Players")
 local Lighting = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
 local LP = Players.LocalPlayer
 
 if ONLY_PLACE_ID and game.PlaceId ~= ONLY_PLACE_ID then
@@ -28,6 +31,8 @@ G.RM_FB = G.RM_FB ~= nil and G.RM_FB or true          -- fullbright
 G.RM_Bright = G.RM_Bright or 3                        -- яркость 0..10
 G.RM_NoFog = G.RM_NoFog ~= nil and G.RM_NoFog or true -- без тумана/теней
 G.RM_Poll = G.RM_Poll or 1                            -- как часто возвращать значения (сек)
+G.RM_TPSpeed = false                                  -- TP walk (ВЫКЛ по умолчанию)
+G.RM_TPSpeedVal = G.RM_TPSpeedVal or 50               -- скорость телепорта, studs/s
 
 -- ================= применение =================
 -- пишем свойство ТОЛЬКО если оно реально отличается.
@@ -66,6 +71,62 @@ local function applyLight()
         setProp(Lighting, "FogColor", Color3.fromRGB(255, 255, 255))
     end
 end
+
+-- ================= TP walk (speed без WalkSpeed) =================
+-- Двигаем HumanoidRootPart телепортами по направлению взгляда.
+-- WalkSpeed остаётся штатной — сервер видит телепорты позиции,
+-- а не скорость. Shift = ускорение x1.6.
+local camFwd, camRight = nil, nil
+local groundT = 0
+
+local function moveKeys()
+    local x, z = 0, 0
+    if UIS:IsKeyDown(Enum.KeyCode.W) then z = z + 1 end
+    if UIS:IsKeyDown(Enum.KeyCode.S) then z = z - 1 end
+    if UIS:IsKeyDown(Enum.KeyCode.A) then x = x - 1 end
+    if UIS:IsKeyDown(Enum.KeyCode.D) then x = x + 1 end
+    local sprint = 1
+    if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then sprint = 1.6 end
+    return x, z, sprint
+end
+
+RunService.RenderStepped:Connect(function(dt)
+    if not G.RM_TPSpeed then return end
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        local ch = LP.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        if not hrp or not hrp.Parent then return end
+
+        local x, z, sprint = moveKeys()
+        if x == 0 and z == 0 then return end
+
+        camFwd = Vector3.new(cam.CFrame.LookVector.X, 0, cam.CFrame.LookVector.Z).Unit
+        camRight = Vector3.new(cam.CFrame.RightVector.X, 0, cam.CFrame.RightVector.Z).Unit
+
+        local spd = (G.RM_TPSpeedVal or 50) * sprint
+        local step = spd * math.min(dt, 0.05)
+        local np = hrp.Position + camFwd * z * step + camRight * x * step
+
+        -- держим корпус на земле: рейкаст вниз раз в 0.15с (без спама)
+        local now = os.clock()
+        if now - groundT > 0.15 then
+            groundT = now
+            local params = RaycastParams.new()
+            params.FilterDescendantsInstances = {ch}
+            params.IgnoreWater = true
+            local res = workspace:Raycast(np + Vector3.new(0, 3, 0), Vector3.new(0, -40, 0), params)
+            if res and not res.Instance:IsA("Terrain") then
+                np = Vector3.new(np.X, res.Position.Y + 1, np.Z)
+            elseif not res then
+                np = Vector3.new(np.X, np.Y, np.Z)
+            end
+        end
+
+        hrp.CFrame = CFrame.new(np) * (hrp.CFrame - hrp.CFrame.Position)
+    end)
+end)
 
 -- ================= Rayfield =================
 local Rayfield = nil
@@ -235,7 +296,33 @@ Main:CreateSlider({
     end,
 })
 
-Main:CreateLabel("Speed убран: серверная проверка кикает на движении")
+-- ===== Speed через TP walk (WalkSpeed не трогаем) =====
+-- без флага: не сохраняется в конфиг, всегда стартует выключенным
+Main:CreateToggle({
+    Name = "Speed (TP walk)",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_TPSpeed = v
+        if v then
+            notify("TP speed ON — WASD = бег, Shift = x1.6. Сервер видит телепорты", 5)
+        else
+            notify("TP speed OFF", 2)
+        end
+    end,
+})
+
+Main:CreateSlider({
+    Name = "TP speed",
+    Range = {10, 300},
+    Increment = 5,
+    Suffix = " st/s",
+    CurrentValue = G.RM_TPSpeedVal,
+    Callback = function(v)
+        G.RM_TPSpeedVal = v
+    end,
+})
+
+Main:CreateLabel("Speed (TP walk): сервер видит телепорты, не скорость — но и телепорты могут палиться")
 
 -- ================= главный цикл =================
 -- Опрос раз в секунду: реже = меньше нагрузки и риска кика.
@@ -249,4 +336,4 @@ task.spawn(function()
     end
 end)
 
-print("[RESIDENCE MASSACRE] v3.0 rayfield loaded | ELITE HUB | Fullbright работает, Speed удалён")
+print("[RESIDENCE MASSACRE] v3.1 rayfield loaded | Fullbright + TP Speed | TP выключен по умолчанию")
