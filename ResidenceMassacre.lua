@@ -55,6 +55,27 @@ local function setProp(obj, name, value)
     end)
 end
 
+-- ================= плавный телепорт (TweenService) =================
+-- Все телепорты (автозабор, авто-заправка, электрика) летят плавно:
+-- tween по CFrame HumanoidRootPart, ~150 студ/с (0.15–1.2 с).
+-- TP walk не тут: он и так двигает каждый кадр маленькими шажками.
+local TweenService = game:GetService("TweenService")
+local TP_SPEED = 150
+
+local function smoothTP(hrp, cf, dur)
+    if not dur then
+        dur = math.clamp(
+            (cf.Position - hrp.Position).Magnitude / TP_SPEED, 0.15, 1.2)
+    end
+    pcall(function()
+        local tw = TweenService:Create(hrp,
+            TweenInfo.new(dur, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+            { CFrame = cf })
+        tw:Play()
+        tw.Completed:Wait()
+    end)
+end
+
 -- оригинальные значения освещения, снятые при запуске:
 -- выключение fullbright/no-fog должно ВОЗВРАЩАТЬ темноту,
 -- а не оставлять наши записи висеть
@@ -922,8 +943,8 @@ local function doPickup(e)
     pcall(function()
         if dist > math.max(maxD - 3, 2) then
             -- телепорт рядом с предметом: для сервера — «игрок стоял рядом»
-            hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
-                * (hrp.CFrame - hrp.CFrame.Position)
+            smoothTP(hrp, CFrame.new(pos + Vector3.new(0, 3, 0))
+                * (hrp.CFrame - hrp.CFrame.Position))
             teleported = true
         end
     end)
@@ -932,10 +953,26 @@ local function doPickup(e)
     e.clickAt = os.clock() -- кулдаун по каждой цели — из слайдера «Скорость действий»
     if teleported then
         task.wait(0.1)
-        pcall(function() hrp.CFrame = origin end)
+        pcall(function() smoothTP(hrp, origin) end)
     end
     task.wait(0.15)
     pickupBusy = false
+end
+
+-- электрику (ящик, провода, ключ) автозабор НЕ трогает — ею занимается
+-- Auto electric, иначе будут случайные клики по проводам и ящику
+local function isElectric(inst)
+    local n = inst
+    while n and n ~= workspace do
+        local low = string.lower(n.Name)
+        if string.find(low, "wire", 1, true)
+            or string.find(low, "fuse", 1, true)
+            or string.find(low, "wrench", 1, true) then
+            return true
+        end
+        n = n.Parent
+    end
+    return false
 end
 
 -- раз в 0.4с берём ближайший подходящий предмет из списка
@@ -953,6 +990,8 @@ task.spawn(function()
                             -- генератор не трогаем — им занимается Auto fuel
                             and not string.find(string.lower(e.itemName or e.inst.Name),
                                 "generator", 1, true)
+                            -- электрику не трогаем — ею занимается Auto electric
+                            and not isElectric(e.inst)
                             and (not e.clickAt or os.clock() - e.clickAt
                                 >= (tonumber(G.RM_ActionDelay) or 3))
                             and pickSelected(e.itemName) then
@@ -1002,8 +1041,8 @@ local function fuelPress(hrp, pos, cd)
     local dist = (pos - hrp.Position).Magnitude
     if dist > math.max(maxD - 3, 2) then
         pcall(function()
-            hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
-                * (hrp.CFrame - hrp.CFrame.Position)
+            smoothTP(hrp, CFrame.new(pos + Vector3.new(0, 3, 0))
+                * (hrp.CFrame - hrp.CFrame.Position))
         end)
         task.wait(0.15) -- позиция успевает дойти до сервера
     end
@@ -1105,7 +1144,7 @@ task.spawn(function()
                             fuelPress(hrp, gen:GetPivot().Position, cdGen)
                             task.wait(tonumber(G.RM_ActionDelay) or 3) -- кулдаун подачи топлива
                         end
-                        pcall(function() hrp.CFrame = origin end)
+                        pcall(function() smoothTP(hrp, origin) end)
                         pickupBusy = false
                     end
                 end
@@ -1139,7 +1178,7 @@ local function fuelManual()
             end
             fuelPress(hrp, gen:GetPivot().Position, cdGen)
             task.wait(delay)
-            pcall(function() hrp.CFrame = origin end)
+            pcall(function() smoothTP(hrp, origin) end)
         end)
         pickupBusy = false
         if ok then
@@ -1150,6 +1189,189 @@ local function fuelManual()
     end)
     return true
 end
+
+-- ===== электрика: ящик (FuseBox) + провода + ключ (Wrench) =====
+-- Провода ломаются случайно (подсвечены Highlight / искры) и требуют
+-- ключ. Порядок: 1) ключа нет → телепорт к WrenchGiver и берём;
+-- 2) открываем ящик (Detector); 3) телепорт к битому проводу → клик.
+-- Если провод не берётся дважды — щёлкаем ящик ещё раз (вдруг закрыт).
+-- Все полёты плавные (TweenService), пока Auto electric включён.
+G.RM_AutoElectric = false -- без флага: всегда стартует выключенным
+local fuseOpened = false   -- мы открыли ящик (нажатие = toggle)
+local wireFixAt = {}       -- [модель провода] = когда чинили (кулдаун 4с)
+local wireTries = {}       -- [модель провода] = попыток; 2 → щёлкаем ящик
+local wrenchGetAt = 0       -- кулдаун добычи ключа
+local elecWarned = false
+
+-- модель/папка/деталь по части имени; needCD = обязателен ClickDetector
+local function elecFind(sub, needCD)
+    local low = string.lower(sub)
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if (d:IsA("Model") or d:IsA("Folder") or d:IsA("BasePart"))
+            and string.find(string.lower(d.Name), low, 1, true) then
+            local cd = needCD and d:FindFirstChildWhichIsA("ClickDetector", true)
+                or nil
+            if not needCD or cd then
+                return d, cd
+            end
+        end
+    end
+    return nil, nil
+end
+
+-- битый провод: подсветка включена (контур) или летят искры
+local function wireBroken(w)
+    local res = false
+    pcall(function()
+        local hl = w:FindFirstChild("Highlight", true)
+        if hl and hl:IsA("Highlight") and hl.Enabled
+            and (hl.FillTransparency or 0) < 0.9 then
+            res = true
+        end
+        if not res then
+            local sp = w:FindFirstChild("Sparkles", true)
+            if sp and sp:IsA("Sparkles") and sp.Enabled then
+                res = true
+            end
+        end
+    end)
+    return res
+end
+
+-- есть ли ключ (Tool «Wrench»/«ключ») в рюкзаке или в руках
+local function findWrenchTool()
+    local function test(t)
+        if not t:IsA("Tool") then return false end
+        local n = string.lower(t.Name)
+        return string.find(n, "wrench", 1, true) ~= nil
+            or string.find(n, "ключ", 1, true) ~= nil
+    end
+    local bp = LP:FindFirstChild("Backpack")
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do
+            if test(t) then return t end
+        end
+    end
+    local ch = LP.Character
+    if ch then
+        for _, t in ipairs(ch:GetChildren()) do
+            if test(t) then return t end
+        end
+    end
+    return nil
+end
+
+-- битые провода: {model, cd} из папки/модели «Wires»
+local function brokenWires()
+    local wires = elecFind("wires", false)
+    if not wires then return {} end
+    local out = {}
+    for _, w in ipairs(wires:GetChildren()) do
+        if w:IsA("Model") or w:IsA("Folder") or w:IsA("BasePart") then
+            local cd = w:FindFirstChildWhichIsA("ClickDetector", true)
+            if cd and wireBroken(w) then
+                out[#out + 1] = { model = w, cd = cd }
+            end
+        end
+    end
+    return out
+end
+
+-- полёт к точке (сохраняем поворот корпуса) + осесть у цели
+local function elecTP(hrp, worldPos, height)
+    smoothTP(hrp, CFrame.new(worldPos + Vector3.new(0, height or 2, 0))
+        * (hrp.CFrame - hrp.CFrame.Position))
+    task.wait(0.15)
+end
+
+local function elecClickBox(hrp, origin)
+    local _, bcd = elecFind("fusebox", true)
+    if not bcd then return false end
+    pickupBusy = true
+    elecTP(hrp, bcd.Position, 2)
+    pcall(function() fireclickdetector(bcd) end)
+    fuseOpened = not fuseOpened
+    task.wait(0.5)
+    smoothTP(hrp, origin)
+    pickupBusy = false
+    return true
+end
+
+task.spawn(function()
+    while true do
+        pcall(function()
+            if G.RM_AutoElectric and not pickupBusy then
+                local ch = LP.Character
+                local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+                if hrp and typeof(fireclickdetector) == "function" then
+                    local broken = brokenWires()
+                    local now = os.clock()
+
+                    -- 1) ключ: нет → телепорт к WrenchGiver и берём
+                    if #broken > 0 and not findWrenchTool()
+                        and (now - wrenchGetAt) > 4 then
+                        local giver, gcd = elecFind("wrenchgiver", true)
+                        if gcd then
+                            pickupBusy = true
+                            local origin = hrp.CFrame
+                            elecTP(hrp, gcd.Position, 3)
+                            pcall(function() fireclickdetector(gcd) end)
+                            task.wait(1) -- выдача инструмента
+                            smoothTP(hrp, origin)
+                            wrenchGetAt = os.clock()
+                            pickupBusy = false
+                            if not findWrenchTool() and not elecWarned then
+                                elecWarned = true
+                                print("[RM] Электрика: ключ (Wrench) не появился после WrenchGiver")
+                            end
+                        elseif not elecWarned then
+                            elecWarned = true
+                            print("[RM] Электрика: WrenchGiver не найден в workspace")
+                        end
+                    end
+
+                    if #broken > 0 and findWrenchTool() then
+                        -- 2) открываем ящик (один раз на аварию)
+                        if not fuseOpened then
+                            elecClickBox(hrp, hrp.CFrame)
+                        end
+
+                        -- 3) чиним первый битый провод (кулдаун 4с на провод)
+                        local w = broken[1]
+                        if w and (not wireFixAt[w.model]
+                            or (now - wireFixAt[w.model]) > 4) then
+                            if (wireTries[w.model] or 0) >= 2 then
+                                -- дважды не берётся — возможно, ящик закрыт:
+                                -- щёлкаем его и пробуем провод снова
+                                wireTries[w.model] = 0
+                                elecClickBox(hrp, hrp.CFrame)
+                            else
+                                pickupBusy = true
+                                local origin = hrp.CFrame
+                                -- ключ в руки, если лежит в рюкзаке
+                                pcall(function()
+                                    local tool = findWrenchTool()
+                                    local hum = ch:FindFirstChildOfClass("Humanoid")
+                                    if tool and hum and tool.Parent ~= ch then
+                                        hum:EquipTool(tool)
+                                    end
+                                end)
+                                elecTP(hrp, w.cd.Position, 2)
+                                pcall(function() fireclickdetector(w.cd) end)
+                                wireFixAt[w.model] = os.clock()
+                                wireTries[w.model] = (wireTries[w.model] or 0) + 1
+                                task.wait(tonumber(G.RM_ActionDelay) or 3)
+                                smoothTP(hrp, origin)
+                                pickupBusy = false
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+        task.wait(0.6)
+    end
+end)
 
 -- ===== аимбот на монстра (камера, бинд) =====
 -- Пока зажат бинд — камера доводится до ближайшего монстра/мутанта
@@ -1736,6 +1958,21 @@ ESP:CreateButton({
     end,
 })
 
+ESP:CreateSection("Электрика")
+ESP:CreateToggle({
+    Name = "Auto electric",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_AutoElectric = v
+        if v and typeof(fireclickdetector) ~= "function" then
+            notify("Auto electric: в экзекуторе нет fireclickdetector", 5)
+        else
+            notify("Auto electric: " .. (v and "ON" or "OFF"), 2)
+        end
+    end,
+})
+ESP:CreateLabel("Провода: нет ключа (Wrench) → телепорт к WrenchGiver за ним → открываем ящик → чиним подсвеченный провод. Автозабор электрику не трогает.")
+
 ESP:CreateSection("Аимбот")
 ESP:CreateLabel("Аимбот на монстра: зажми бинд — камера наводится на ближайшего монстра/мутанта (до 200 м)")
 ESP:CreateKeybind({
@@ -1903,4 +2140,4 @@ end)
 
 SettingsTab:CreateLabel("Окно перетаскивается за шапку. Тема сохраняется в конфиге.")
 
-print("[RESIDENCE MASSACRE] v4.4 rayfield loaded | порог топлива + кнопка «Заправить сейчас» | лестницы при спиде | туман (Atmosphere) при Fullbright | бинды + аимбот + скорость действий | ESP | камера 1/3 | Settings")
+print("[RESIDENCE MASSACRE] v4.5 rayfield loaded | электрика (ключ Wrench → ящик → провода) | плавный телепорт Tween везде | порог топлива + «Заправить сейчас» | лестницы | туман | бинды + аимбот | ESP | камера 1/3 | Settings")
