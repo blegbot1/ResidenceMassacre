@@ -34,6 +34,7 @@ G.RM_TPSpeedVal = G.RM_TPSpeedVal or 50               -- скорость тел
 G.RM_StaminaLock = false                              -- infinite stamina (ВЫКЛ по умолчанию)
 G.RM_CamMode = G.RM_CamMode or "game"                 -- камера: game / first / third
 G.RM_ActionDelay = G.RM_ActionDelay or 3               -- задержка действий, с (кулдауны)
+G.RM_FuelThreshold = G.RM_FuelThreshold or 50          -- авто-заправка ниже уровня, % (100 = всегда)
 local pickupBusy = false                              -- идёт автозабор (TP walk ждёт)
 
 -- ================= применение =================
@@ -979,6 +980,7 @@ end)
 G.RM_AutoFuel = false -- без флага: всегда стартует выключенным
 local lastCanAt = 0
 local fuelWarned = false
+local fuelLvlWarned = false -- предупреждение «значение топлива не найдено»
 
 -- ищем модель по части имени (generator / jerrycan) с её ClickDetector
 local function findByModelName(sub)
@@ -1016,6 +1018,53 @@ local function fuelPress(hrp, pos, cd)
     return false
 end
 
+-- текущий уровень топлива генератора в процентах (0..100) или nil,
+-- если игра нигде не хранит число, которое мы можем прочитать:
+--  1) Value-объект с "fuel" в имени; 2) атрибут; 3) текст над генератором
+local function fuelLevel(gen)
+    if not gen then return nil end
+    local v = nil
+    pcall(function()
+        for _, d in ipairs(gen:GetDescendants()) do
+            if d:IsA("ValueBase") and typeof(d.Value) == "number" then
+                local n = string.lower(d.Name)
+                if string.find(n, "fuel", 1, true) or string.find(n, "gas", 1, true) then
+                    v = d.Value
+                    break
+                end
+            end
+        end
+        if v == nil then
+            for _, name in ipairs({ "Fuel", "fuel", "FuelLevel", "Gas", "gas" }) do
+                local a = gen:GetAttribute(name)
+                if typeof(a) == "number" then
+                    v = a
+                    break
+                end
+            end
+        end
+        if v == nil then
+            for _, d in ipairs(gen:GetDescendants()) do
+                if d:IsA("TextLabel") then
+                    local t = string.lower(tostring(d.Text or ""))
+                    local num = string.match(t, "(%d+)%s*%%")
+                        or string.match(t, "fuel%s*[:=]?%s*(%d+)")
+                        or string.match(t, "^%s*(%d+)%s*$")
+                    if num then
+                        v = tonumber(num)
+                        break
+                    end
+                end
+            end
+        end
+    end)
+    if v == nil then return nil end
+    if v > 0 and v <= 1 then v = v * 100 end -- шкала 0..1 → проценты
+    if v < 0 then v = 0 end
+    if v > 100 then v = 100 end
+    return v
+end
+
 task.spawn(function()
     while true do
         pcall(function()
@@ -1028,9 +1077,19 @@ task.spawn(function()
                     -- канистра у нас в руках (модель внутри персонажа)
                     local held = can and ch and can:IsDescendantOf(ch)
                     local tookRecently = (os.clock() - lastCanAt) < 15
+                    -- порог игрока: пополняем, только когда топлива
+                    -- меньше заданного (0 = никогда, 100 = всегда);
+                    -- если прочитать не удалось — пополняем всегда
+                    local lvl = fuelLevel(gen)
+                    local thr = tonumber(G.RM_FuelThreshold) or 50
+                    local lowFuel = (lvl == nil) or (lvl < thr)
+                    if lvl == nil and not fuelLvlWarned then
+                        fuelLvlWarned = true
+                        print("[RM] Значение топлива генератора не найдено — порог не работает, заправляю всегда")
+                    end
                     -- брать канистру есть смысл только при наличии генератора
-                    local wantCan = (cdCan ~= nil) and (not held) and (cdGen ~= nil)
-                    local wantGen = (cdGen ~= nil) and (held or tookRecently)
+                    local wantCan = lowFuel and (cdCan ~= nil) and (not held) and (cdGen ~= nil)
+                    local wantGen = lowFuel and (cdGen ~= nil) and (held or tookRecently)
                     if wantCan or wantGen then
                         pickupBusy = true
                         local origin = hrp.CFrame
@@ -1055,6 +1114,42 @@ task.spawn(function()
         task.wait(0.5)
     end
 end)
+
+-- ===== ручная заправка: кнопка «Заправить сейчас» =====
+-- Один полный цикл (канистра → генератор), когда захочет игрок —
+-- независимо от Auto fuel и порога. true = запускается, false = занято.
+local function fuelManual()
+    if pickupBusy then return false end
+    task.spawn(function()
+        pickupBusy = true
+        local ok, err = pcall(function()
+            local ch = LP.Character
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            if not hrp then error("нет персонажа") end
+            local can, cdCan = findByModelName("jerrycan")
+            local gen, cdGen = findByModelName("generator")
+            if not (gen and cdGen) then error("генератор не найден") end
+            if not (can and cdCan) then error("канистра не найдена") end
+            local origin = hrp.CFrame
+            local delay = tonumber(G.RM_ActionDelay) or 3
+            if not can:IsDescendantOf(ch) then
+                fuelPress(hrp, can:GetPivot().Position, cdCan)
+                lastCanAt = os.clock()
+                task.wait(delay)
+            end
+            fuelPress(hrp, gen:GetPivot().Position, cdGen)
+            task.wait(delay)
+            pcall(function() hrp.CFrame = origin end)
+        end)
+        pickupBusy = false
+        if ok then
+            print("[RM] Заправка: канистра → генератор ✓")
+        else
+            print("[RM] Ручная заправка не удалась: " .. tostring(err))
+        end
+    end)
+    return true
+end
 
 -- ===== аимбот на монстра (камера, бинд) =====
 -- Пока зажат бинд — камера доводится до ближайшего монстра/мутанта
@@ -1594,7 +1689,7 @@ ESP:CreateKeybind({
 })
 
 ESP:CreateSection("Генератор")
-ESP:CreateLabel("Автотопливо: телепорт к JerryCan → взять (3с) → к Generator → подать топливо (3с) → обратно")
+ESP:CreateLabel("Автотопливо: телепорт к JerryCan → взять → к Generator → подать топливо → обратно. Паузы — «Скорость действий»")
 local fuelToggle
 fuelToggle = ESP:CreateToggle({
     Name = "Auto fuel",
@@ -1615,6 +1710,29 @@ ESP:CreateKeybind({
     Flag = "RM_BindFuel",
     Callback = function()
         fuelToggle:Set(not G.RM_AutoFuel)
+    end,
+})
+
+ESP:CreateSlider({
+    Name = "Порог топлива",
+    Range = {0, 100},
+    Increment = 5,
+    Suffix = " %",
+    CurrentValue = G.RM_FuelThreshold,
+    Flag = "RM_FuelThreshold",
+    Callback = function(v)
+        G.RM_FuelThreshold = v
+    end,
+})
+ESP:CreateLabel("Порог: авто-заправка бежит только когда топлива меньше заданного (0 = никогда, 100 = всегда). Не постоянно — а когда меньше порога.")
+ESP:CreateButton({
+    Name = "Заправить сейчас (вручную)",
+    Callback = function()
+        if fuelManual() then
+            notify("Заправка: еду за канистрой к генератору", 4)
+        else
+            notify("Идёт другое действие — подожди секунду", 3)
+        end
     end,
 })
 
@@ -1785,4 +1903,4 @@ end)
 
 SettingsTab:CreateLabel("Окно перетаскивается за шапку. Тема сохраняется в конфиге.")
 
-print("[RESIDENCE MASSACRE] v4.3 rayfield loaded | лестницы при спиде | туман (Atmosphere) гасится при Fullbright | бинды + аимбот + скорость действий + анти-клип | ESP | камера 1/3 | Settings")
+print("[RESIDENCE MASSACRE] v4.4 rayfield loaded | порог топлива + кнопка «Заправить сейчас» | лестницы при спиде | туман (Atmosphere) при Fullbright | бинды + аимбот + скорость действий | ESP | камера 1/3 | Settings")
