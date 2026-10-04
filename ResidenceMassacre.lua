@@ -11,9 +11,11 @@
 --  Запуск: loadstring(game:HttpGet("https://raw.githubusercontent.com/blegbot1/ResidenceMassacre/refs/heads/main/ResidenceMassacre.lua",true))()
 -- ============================================================
 
--- Place ID Residence Massacre (оригинал + обновлённый, ID из RMxploitt).
--- Пустой список {} = скрипт стартует в любой игре.
-local ONLY_PLACE_IDS = { 14896802601, 16667550979 }
+-- Проверка, что это Residence Massacre: GameId покрывает все плейсы игры
+-- (лобби 14437001043, Ночь 1 14896802601, Ночь 2 16667550979 — из
+-- script-sources/residence-massacre). RM_GAME_ID = 0 и пустой список = везде.
+local RM_GAME_ID = 4987467534
+local ONLY_PLACE_IDS = { 14437001043, 14896802601, 16667550979 }
 
 local Players = game:GetService("Players")
 local Lighting = game:GetService("Lighting")
@@ -21,8 +23,12 @@ local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
 local LP = Players.LocalPlayer
 
-if #ONLY_PLACE_IDS > 0 and not table.find(ONLY_PLACE_IDS, game.PlaceId) then
-    warn("[RM] это не Residence Massacre (PlaceId " .. tostring(game.PlaceId) .. ") — выход")
+local rmCheck = (RM_GAME_ID ~= 0) or (#ONLY_PLACE_IDS > 0)
+local rmOkGame = (RM_GAME_ID ~= 0 and game.GameId == RM_GAME_ID)
+    or table.find(ONLY_PLACE_IDS, game.PlaceId) ~= nil
+if rmCheck and not rmOkGame then
+    warn("[RM] это не Residence Massacre (GameId " .. tostring(game.GameId)
+        .. ", PlaceId " .. tostring(game.PlaceId) .. ") — выход")
     return
 end
 
@@ -54,7 +60,7 @@ pcall(function()
     end
 end)
 
-G.RM_FB = G.RM_FB ~= nil and G.RM_FB or true          -- fullbright (+ всегда без тумана)
+if G.RM_FB == nil then G.RM_FB = true end                -- fullbright (+ всегда без тумана)
 G.RM_Bright = G.RM_Bright or 3                        -- яркость 0..10
 G.RM_TPSpeed = false                                  -- TP walk (ВЫКЛ по умолчанию)
 G.RM_TPSpeedVal = G.RM_TPSpeedVal or 50               -- скорость телепорта, studs/s
@@ -225,6 +231,7 @@ end)
 -- на том же кадре — применим ЕЩЁ РАЗ после всех RenderStepped
 pcall(function() RunService:UnbindFromRenderStep("RMLightLate") end)
 RunService:BindToRenderStep("RMLightLate", Enum.RenderPriority.Camera.Value + 10, function()
+    if getgenv().RM_Run ~= RUN_ID then return end
     if G.RM_FB then pcall(applyLight) end
 end)
 
@@ -521,12 +528,14 @@ task.spawn(function()
                             t.Enabled = false
                             tempScriptOff = true
                         end
-                    elseif t and typeof(t.Value) == "number"
+                    elseif t and t:IsA("ValueBase")
+                        and typeof(t.Value) == "number"
                         and t.Value ~= 20 then
                         t.Value = 20
                     end
                     local f = ch:FindFirstChild("Freeze", true)
-                    if f and typeof(f.Value) == "number" and f.Value ~= 0 then
+                    if f and f:IsA("ValueBase") and typeof(f.Value) == "number"
+                        and f.Value ~= 0 then
                         f.Value = 0
                     end
                 end
@@ -551,7 +560,8 @@ task.spawn(function()
                     if b:GetAttribute("Max") ~= 999999 then
                         b:SetAttribute("Max", 999999)
                     end
-                    if typeof(b.Value) == "number" and b.Value ~= 999999 then
+                    if b:IsA("ValueBase") and typeof(b.Value) == "number"
+                        and b.Value ~= 999999 then
                         b.Value = 999999
                     end
                 end
@@ -578,6 +588,7 @@ local scareConn = nil
 -- Noclip: подключается тоглом в GUI (здесь только состояние)
 G.RM_Noclip = false
 local noclipConn = nil
+local noclipSaved = {} -- исходные CanCollide до включения (чтобы вернуть свои)
 
 -- ================= Mutant ESP =================
 -- Красный хайлайт + метка (дистанция и HP) через стены.
@@ -703,8 +714,10 @@ RunService.RenderStepped:Connect(function()
             local e = mutantCache[i]
             local m = e.model
             if not e.hl.Parent or not e.gui.Parent then
-                -- хайлайт/метку удалили — убираем из кэша,
-                -- постоянный скан пересоздаст их сам
+                -- хайлайт/метку удалили — убираем из кэша и добиваем
+                -- уцелевшего «сироту» (иначе дубликат при пересоздании)
+                pcall(function() e.hl:Destroy() end)
+                pcall(function() e.gui:Destroy() end)
                 if m then inCache[m] = nil end
                 table.remove(mutantCache, i)
             elseif not m or not m.Parent or not isMutantModel(m) then
@@ -1054,7 +1067,18 @@ local function doPickup(e)
     local maxD = 32
     if e.prompt then maxD = math.min(maxD, e.prompt.MaxActivationDistance or 10) end
     if e.cd then maxD = math.min(maxD, e.cd.MaxActivationDistance or 32) end
-    if not e.prompt and not e.cd then maxD = 10 end -- только Remote — держимся ближе
+    -- кликнуть нечем (функции не экспортированы экзекутором) — не
+    -- телепортируемся впустую, повтор через минуту
+    local canFire = (e.prompt and typeof(fireproximityprompt) == "function")
+        or (e.cd and typeof(fireclickdetector) == "function")
+    if not canFire then
+        if not fireWarned then
+            fireWarned = true
+            print("[RM] В экзекуторе нет fireproximityprompt/fireclickdetector — автозабор не сможет кликать предметы")
+        end
+        e.clickAt = os.clock() + 60
+        return
+    end
 
     local dist = (pos - hrp.Position).Magnitude
     pickupBusy = true
@@ -1142,7 +1166,7 @@ end)
 -- телепорт к генератору → подать топливо (кулдаун ~3с) → обратно.
 -- Для сервера мы всё время стоим рядом с тем, что жмём.
 G.RM_AutoFuel = false -- без флага: всегда стартует выключенным
-local lastCanAt = 0
+local lastCanAt = -1e9  -- «нулевой» 0 врёт при маленьком os.clock(): берём −∞
 local fuelWarned = false
 local fuelLvlWarned = false -- предупреждение «значение топлива не найдено»
 
@@ -1162,6 +1186,7 @@ end
 
 -- встать рядом с целью (если далеко) и нажать её
 local function fuelPress(hrp, pos, cd)
+    if not pos or not cd then return false end
     local maxD = cd.MaxActivationDistance or 32
     local dist = (pos - hrp.Position).Magnitude
     if dist > math.max(maxD - 3, 2) then
@@ -1223,7 +1248,8 @@ local function fuelLevel(gen)
         end
     end)
     if v == nil then return nil end
-    if v > 0 and v <= 1 then v = v * 100 end -- шкала 0..1 → проценты
+    -- шкала игры 0..100 (сверено: Shack.Generator.Fuel показывают как %);
+    -- старое умножение ломалось на значении 1% → 100% и заправка молчала
     if v < 0 then v = 0 end
     if v > 100 then v = 100 end
     return v
@@ -1297,6 +1323,7 @@ end)
 local function fuelManual()
     if pickupBusy then return false end
     task.spawn(function()
+        if getgenv().RM_Run ~= RUN_ID then return end
         pickupBusy = true
         local hrp, origin = nil, nil
         local ok, err = pcall(function()
@@ -1310,11 +1337,17 @@ local function fuelManual()
             if not (can and cdCan) then error("канистра не найдена") end
             local delay = tonumber(G.RM_ActionDelay) or 0.1
             if not can:IsDescendantOf(ch) then
-                fuelPress(hrp, can:GetPivot().Position, cdCan)
-                lastCanAt = os.clock()
+                if fuelPress(hrp, can:GetPivot().Position, cdCan) then
+                    lastCanAt = os.clock()
+                end
                 task.wait(delay)
             end
-            fuelPress(hrp, gen:GetPivot().Position, cdGen)
+            -- после yield — проверка re-run: старый прогон не должен
+            -- продолжать телепортировать (кнопка жива до ~10с)
+            if getgenv().RM_Run ~= RUN_ID then return end
+            if not fuelPress(hrp, gen:GetPivot().Position, cdGen) then
+                error("нет fireclickdetector у генератора")
+            end
             task.wait(delay)
         end)
         -- возвращаемся всегда, даже после ошибки
@@ -1337,10 +1370,23 @@ end
 -- Generator → клик по генератору → вставка. «В руках» = стал потомком
 -- персонажа ИЛИ кликнули <15с назад. 4 неудачные вставки → стоп.
 G.RM_AutoCell = false -- без флага: всегда стартует выключенным
-local cellGrabAt = 0  -- последний клик по капсуле (окно доставки 15с)
-local cellTriedAt = 0 -- последняя попытка вставки (кулдаун попыток)
+-- −1e9 вместо 0: при os.clock() < 15 «нулевой» 0 делал wantGrab/wantPut ложными
+local cellGrabAt = -1e9 -- последний клик по капсуле (окно доставки 15с)
+local cellTriedAt = -1e9 -- последняя попытка вставки (кулдаун попыток)
 local cellTries = 0   -- неудачных вставок подряд
 local cellWarned = false
+
+-- позиция объекта (Model/BasePart; у Folder — первая деталь).
+-- НЕ брать Position у ClickDetector: у него нет такого свойства —
+-- только что это рвало ящик/ключ/капсулу в pcall
+local function objPos(o)
+    if not o then return nil end
+    if o:IsA("BasePart") then return o.Position end
+    local okp, pos = pcall(function() return o:GetPivot().Position end)
+    if okp and typeof(pos) == "Vector3" then return pos end
+    local h = o:FindFirstChildWhichIsA("BasePart", true)
+    return h and h.Position or nil
+end
 
 -- свободная капсула: Model «PowerCell» с ClickDetector, НЕ внутри Generator
 local function findLooseCell()
@@ -1387,7 +1433,7 @@ task.spawn(function()
                             local origin = hrp.CFrame
                             local okG, errG = pcall(function()
                                 -- встанет сам рядом с капсулой и жмёт
-                                fuelPress(hrp, cdCell.Position, cdCell)
+                                fuelPress(hrp, objPos(cell), cdCell)
                                 cellGrabAt = os.clock()
                                 task.wait(delay)
                             end)
@@ -1400,7 +1446,7 @@ task.spawn(function()
                             pickupBusy = true
                             local origin = hrp.CFrame
                             local okG, errG = pcall(function()
-                                fuelPress(hrp, cdGen.Position, cdGen)
+                                fuelPress(hrp, objPos(gen), cdGen)
                                 cellTriedAt = os.clock()
                                 cellTries = cellTries + 1
                                 task.wait(delay)
@@ -1430,9 +1476,10 @@ G.RM_AutoElectric = false -- без флага: всегда стартует в
 local fuseOpened = false   -- мы открыли ящик (нажатие = toggle)
 local wireFixAt = {}       -- [модель провода] = когда чинили (кулдаун 4с)
 local wireTries = {}       -- [модель провода] = попыток; 2 → щёлкаем ящик
-local wrenchGetAt = 0       -- кулдаун добычи ключа
+local wrenchGetAt = -1e9  -- кулдаун добычи ключа (0 врёт при маленьком os.clock)
 local elecWarned = false
 local elecBrokenSeen = -1   -- сколько битых проводов видели вчера (для отладки)
+local elecFried = nil       -- последнее известное FusesFried (свет/проводы)
 
 -- модель/папка/деталь по части имени; needCD = обязателен ClickDetector
 local function elecFind(sub, needCD)
@@ -1450,7 +1497,9 @@ local function elecFind(sub, needCD)
     return nil, nil
 end
 
--- битый провод: подсветка включена (контур) или летят искры
+-- битый провод: подсветка включена (контур) или летят искры —
+-- Sparkles.Enabled == true сверено с открытым исходником
+-- script-sources/residence-massacre
 local function wireBroken(w)
     local res = false
     pcall(function()
@@ -1459,19 +1508,21 @@ local function wireBroken(w)
             and (hl.FillTransparency or 0) < 0.9 then
             res = true
         end
-        if not res then
-            -- у битого провода «Sparkles» включён (в игре это объект с
-            -- Enabled — ParticleEmitter/PointLight); значение берём как есть
-            local sp = w:FindFirstChild("Sparkles", true)
-            if sp then
-                if typeof(sp.Enabled) == "boolean" then
-                    res = sp.Enabled
-                elseif typeof(sp.Value) == "boolean" then
-                    res = sp.Value
-                end
+    end)
+    if not res then
+        local sp = w:FindFirstChild("Sparkles", true)
+        if sp then
+            -- отдельные pcall: если у объекта нет Enabled, доступ падает
+            -- и убивал бы весь блок — Value пробуем независимо
+            local okE, en = pcall(function() return sp.Enabled end)
+            if okE and typeof(en) == "boolean" then
+                res = en
+            else
+                local okV, val = pcall(function() return sp.Value end)
+                if okV and typeof(val) == "boolean" then res = val end
             end
         end
-    end)
+    end
     return res
 end
 
@@ -1524,13 +1575,16 @@ local function elecTP(hrp, worldPos, height)
 end
 
 local function elecClickBox(hrp, origin)
-    local _, bcd = elecFind("fusebox", true)
+    local box, bcd = elecFind("fusebox", true)
     if not bcd then return false end
     pickupBusy = true
     local okB, errB = pcall(function()
-        elecTP(hrp, bcd.Position, 2)
-        pcall(function() fireclickdetector(bcd) end)
-        fuseOpened = not fuseOpened
+        local pos = objPos(box)
+        if pos then elecTP(hrp, pos, 2) end
+        -- toggle засчитываем только при реальном клике
+        if pcall(function() fireclickdetector(bcd) end) then
+            fuseOpened = not fuseOpened
+        end
         task.wait(0.3)
     end)
     -- возвращаемся всегда, даже после ошибки (респавн/исчез объект)
@@ -1550,6 +1604,32 @@ task.spawn(function()
                 local ch = LP.Character
                 local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
                 if hrp and typeof(fireclickdetector) == "function" then
+                    -- GameState.FusesFried: true = свет вырубили (проводы
+                    -- горят), false = питание ок → сканировать нечего
+                    local fried = nil
+                    pcall(function()
+                        local gs = game:FindFirstChild("ReplicatedStorage")
+                        gs = gs and gs:FindFirstChild("GameState")
+                        local f = gs and gs:FindFirstChild("FusesFried")
+                        if f then fried = (f.Value == true) end
+                    end)
+                    if fried ~= elecFried then
+                        elecFried = fried
+                        if fried == true then
+                            print("[RM] Электрика: питание вырубили "
+                                .. "(FusesFried) — чиню провода")
+                            -- новая авария: ящик закрыт, счётчики чисты
+                            fuseOpened = false
+                            wireTries = {}
+                            wireFixAt = {}
+                        elseif fried == false then
+                            print("[RM] Электрика: питание восстановлено")
+                        end
+                    end
+                    if fried == false then
+                        return -- питание ок — нечего чинить
+                    end
+
                     local broken = brokenWires()
                     local now = os.clock()
 
@@ -1591,12 +1671,13 @@ task.spawn(function()
                     -- 1) ключ: нет → телепорт к WrenchGiver и берём
                     if #broken > 0 and not findWrenchTool()
                         and (now - wrenchGetAt) > 4 then
-                        local _, gcd = elecFind("wrenchgiver", true)
+                        local giver, gcd = elecFind("wrenchgiver", true)
                         if gcd then
                             pickupBusy = true
                             local origin = hrp.CFrame
                             local okW, errW = pcall(function()
-                                elecTP(hrp, gcd.Position, 3)
+                                local pos = objPos(giver)
+                                if pos then elecTP(hrp, pos, 3) end
                                 pcall(function() fireclickdetector(gcd) end)
                                 task.wait(0.6) -- выдача инструмента
                             end)
@@ -1641,11 +1722,7 @@ task.spawn(function()
                                     if tool and hum and tool.Parent ~= ch then
                                         hum:EquipTool(tool)
                                     end
-                                    local pos = (w.cd and w.cd.Position)
-                                        or (w.model:IsA("BasePart")
-                                            and w.model.Position)
-                                        or (w.model.PrimaryPart
-                                            and w.model.PrimaryPart.Position)
+                                    local pos = objPos(w.model)
                                     if pos then elecTP(hrp, pos, 2) end
                                     -- сначала ремоут ClickWire (проверенный
                                     -- путь RMxploitt), без него — ClickDetector
@@ -1740,7 +1817,8 @@ RunService.RenderStepped:Connect(function()
         for i = #espCache, 1, -1 do
             local e = espCache[i]
             local inst = e.inst
-            if not inst or not inst.Parent or not e.hl.Parent then
+            if not inst or not inst.Parent or not e.hl.Parent
+                or not e.gui.Parent then
                 -- инстанс или сам хайлайт удалили — чистим
                 if inst then espBy[inst] = nil end
                 pcall(function() e.hl:Destroy() end)
@@ -2070,6 +2148,7 @@ PlayerTab:CreateSlider({
     Increment = 5,
     Suffix = " st/s",
     CurrentValue = G.RM_TPSpeedVal,
+    Flag = "RM_TPSpeedVal",
     Callback = function(v)
         G.RM_TPSpeedVal = v
     end,
@@ -2181,14 +2260,20 @@ noclipToggle = PlayerTab:CreateToggle({
     Callback = function(v)
         G.RM_Noclip = v
         if v then
+            if noclipConn then noclipConn:Disconnect() noclipConn = nil end
             noclipConn = RunService.Stepped:Connect(function()
                 if getgenv().RM_Run ~= RUN_ID then return end
                 pcall(function()
                     local ch = LP.Character
                     if ch then
                         for _, p in ipairs(ch:GetDescendants()) do
-                            if p:IsA("BasePart") and p.CanCollide then
-                                p.CanCollide = false
+                            if p:IsA("BasePart") then
+                                -- помним исходное значение: при выключении
+                                -- вернём СВОИ коллизии, а не все подряд
+                                if noclipSaved[p] == nil then
+                                    noclipSaved[p] = p.CanCollide
+                                end
+                                if p.CanCollide then p.CanCollide = false end
                             end
                         end
                     end
@@ -2198,15 +2283,11 @@ noclipToggle = PlayerTab:CreateToggle({
         else
             if noclipConn then noclipConn:Disconnect() noclipConn = nil end
             pcall(function()
-                local ch = LP.Character
-                if ch then
-                    for _, p in ipairs(ch:GetDescendants()) do
-                        if p:IsA("BasePart") and p.CanCollide == false then
-                            p.CanCollide = true
-                        end
-                    end
+                for part, was in pairs(noclipSaved) do
+                    if part.Parent then part.CanCollide = was end
                 end
             end)
+            noclipSaved = {}
             notify("Noclip OFF", 2)
         end
     end,
@@ -2339,6 +2420,15 @@ Night1:CreateToggle({
     CurrentValue = false,
     Callback = function(v)
         G.RM_AutoElectric = v
+        if v then
+            -- чистое состояние на каждый включ (ящик/счётчики/кулдауны)
+            fuseOpened = false
+            wireTries = {}
+            wireFixAt = {}
+            elecWarned = false
+            elecBrokenSeen = -1
+            elecFried = nil
+        end
         if v and typeof(fireclickdetector) ~= "function" then
             notify("Auto electric: в экзекуторе нет fireclickdetector", 5)
         else
@@ -2370,6 +2460,7 @@ Night1:CreateButton({
             return
         end
         local origin = hrp.CFrame
+        local detWas = det:IsA("BasePart") and det.CanCollide or nil
         pickupBusy = true
         local ok, err = pcall(function()
             if det:IsA("BasePart") then det.CanCollide = false end
@@ -2379,6 +2470,12 @@ Night1:CreateButton({
             task.wait(0.25)
             smoothTP(hrp, CFrame.new(-45.114, 7.85, -60.241))
             task.wait(0.5)
+        end)
+        -- вернуть коллизию дровяной кучки, какой она была
+        pcall(function()
+            if detWas ~= nil and det:IsA("BasePart") then
+                det.CanCollide = detWas
+            end
         end)
         pcall(function() smoothTP(hrp, origin) end)
         pickupBusy = false
@@ -2398,6 +2495,7 @@ Night1:CreateToggle({
     Callback = function(v)
         G.RM_AutoScare = v
         if v then
+            if scareConn then scareConn:Disconnect() scareConn = nil end
             scareConn = workspace.ChildAdded:Connect(function(obj)
                 if getgenv().RM_Run ~= RUN_ID then return end
                 if not G.RM_AutoScare then return end
@@ -2466,8 +2564,8 @@ cellToggle = Night2:CreateToggle({
         if v then
             cellTries = 0
             cellWarned = false
-            cellGrabAt = 0
-            cellTriedAt = 0
+            cellGrabAt = -1e9
+            cellTriedAt = -1e9
             notify("Auto PowerCell ON — капсула → генератор", 3)
         else
             notify("Auto PowerCell OFF", 2)
@@ -2707,8 +2805,8 @@ tpBtnNames("Мармеладка", {"Marshmallow"}, Vector3.new(0, 3, 3))
 tpBtnNames("Фотоловушка", {"TrailCamera"}, Vector3.new(0, 3, 3))
 tpBtnNames("Батарейка", {"Battery"}, Vector3.new(0, 3, 3))
 
-TPTab:CreateSection("Ночь 3 — укрытие")
-tpBtn("Укрытие (Ночь 3)", LOC.safe1)
+-- (точки укрытия Ночи 3 не было ни в одном исходнике — убрали
+-- копипасту с safe1 Ночи 1)
 
 TPTab:CreateSection("Spirit")
 tpBtnNames("Кровать (спрятаться)", {"Bed", "PlayerBed"}, Vector3.new(0, 5, -6))
@@ -2832,6 +2930,7 @@ local function changeThemeNow()
     themeToken = themeToken + 1
     local mine = themeToken
     task.delay(0.2, function()
+        if getgenv().RM_Run ~= RUN_ID then return end
         if mine ~= themeToken then return end
         pcall(function()
             if type(Window.ModifyTheme) == "function" then
@@ -2968,4 +3067,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.14 rayfield loaded | Place ID (2 ID) | Anti-Freeze через LocalScript + Infinite O2 (V) + Noclip (F) | Auto Scare (флешка) | Ночь 1: камин, Ночь 2: проводы/доставка/Escape/Revive | ТП: новая карта Н2 | Ночь 2 = Auto PowerCell | Ночь 3 = аимбот | страховка pickupBusy | вкладка Игрок | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.15 rayfield loaded | РЕВИЗИЯ: починен .Position у ClickDetector (ящик/ключ/провод/капсула — электрика и Ночь 2 были мертвы) | GameId-проверка (лобби+ночи) | FusesFried-гейт | Infinite O2/Auto Scare/камин | ТП новая карта Н2 | страховка pickupBusy | вкладка Игрок | ESP | Settings")
