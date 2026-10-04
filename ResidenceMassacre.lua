@@ -35,6 +35,7 @@ G.RM_StaminaLock = false                              -- infinite stamina (ВЫ�
 G.RM_CamMode = G.RM_CamMode or "game"                 -- камера: game / first / third
 G.RM_ActionDelay = G.RM_ActionDelay or 3               -- задержка действий, с (кулдауны)
 G.RM_FuelThreshold = G.RM_FuelThreshold or 50          -- авто-заправка ниже уровня, % (100 = всегда)
+G.RM_TweenSpeed = G.RM_TweenSpeed or 150               -- скорость плавных телепортов, студ/с
 local pickupBusy = false                              -- идёт автозабор (TP walk ждёт)
 
 -- ================= применение =================
@@ -57,15 +58,16 @@ end
 
 -- ================= плавный телепорт (TweenService) =================
 -- Все телепорты (автозабор, авто-заправка, электрика) летят плавно:
--- tween по CFrame HumanoidRootPart, ~150 студ/с (0.15–1.2 с).
+-- tween по CFrame HumanoidRootPart, скорость — слайдер «Скорость
+-- твинов» (G.RM_TweenSpeed, по умолчанию 150 студ/с, 0.15–3 с).
 -- TP walk не тут: он и так двигает каждый кадр маленькими шажками.
 local TweenService = game:GetService("TweenService")
-local TP_SPEED = 150
 
 local function smoothTP(hrp, cf, dur)
     if not dur then
+        local spd = tonumber(G.RM_TweenSpeed) or 150
         dur = math.clamp(
-            (cf.Position - hrp.Position).Magnitude / TP_SPEED, 0.15, 1.2)
+            (cf.Position - hrp.Position).Magnitude / spd, 0.15, 3)
     end
     pcall(function()
         local tw = TweenService:Create(hrp,
@@ -1744,6 +1746,18 @@ PlayerTab:CreateSlider({
     end,
 })
 
+PlayerTab:CreateSlider({
+    Name = "Скорость твинов",
+    Range = {50, 500},
+    Increment = 10,
+    Suffix = " st/s",
+    CurrentValue = G.RM_TweenSpeed,
+    Flag = "RM_TweenSpeed",
+    Callback = function(v)
+        G.RM_TweenSpeed = v
+    end,
+})
+
 PlayerTab:CreateKeybind({
     Name = "Бинд TP speed",
     CurrentKeybind = "B",
@@ -2139,4 +2153,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.7 rayfield loaded | вкладка Игрок (спид+стамина+автозабор) | Ночь 1 = генератор+электрика, Ночь 3 = аимбот | подписи убраны | плавный телепорт Tween | ESP | камера 1/3 | Settings")
+print("[RESIDENCE MASSACRE] v4.8 rayfield loaded | слайдер «Скорость твинов» | вкладка Игрок (спид+стамина+автозабор) | Ночь 1 = генератор+электрика, Ночь 3 = аимбот | подписи убраны | ESP | камера 1/3 | Settings")
