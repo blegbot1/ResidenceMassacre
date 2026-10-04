@@ -1690,8 +1690,6 @@ end)
 -- ================= вкладка =================
 local Main = Window:CreateTab("Main", 4483362458)
 
-Main:CreateLabel("Fullbright | клиентские свойства | без обхода античита")
-
 Main:CreateToggle({
     Name = "Fullbright",
     CurrentValue = G.RM_FB,
@@ -1742,8 +1740,6 @@ Main:CreateSlider({
     end,
 })
 
-Main:CreateLabel("Speed (TP walk): сервер видит телепорты, не скорость — но и телепорты могут палиться")
-
 Main:CreateKeybind({
     Name = "Бинд TP speed",
     CurrentKeybind = "B",
@@ -1778,6 +1774,87 @@ Main:CreateKeybind({
     Flag = "RM_BindStam",
     Callback = function()
         stamToggle:Set(not G.RM_StaminaLock)
+    end,
+})
+
+-- ================= вкладки по ночам =================
+-- Ночь 1: провода + заправка генератора
+-- Ночь 2: пусто (как договорились)
+-- Ночь 3: монстр → аимбот
+local Night1 = Window:CreateTab("Ночь 1", 4483362458)
+
+Night1:CreateSection("Генератор")
+local fuelToggle
+fuelToggle = Night1:CreateToggle({
+    Name = "Auto fuel",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_AutoFuel = v
+        if v and typeof(fireclickdetector) ~= "function" then
+            notify("Auto fuel: в экзекуторе нет fireclickdetector — нажимать нечем", 5)
+        else
+            notify("Auto fuel: " .. (v and "ON" or "OFF"), 2)
+        end
+    end,
+})
+
+Night1:CreateKeybind({
+    Name = "Бинд Auto fuel",
+    CurrentKeybind = "J",
+    Flag = "RM_BindFuel",
+    Callback = function()
+        fuelToggle:Set(not G.RM_AutoFuel)
+    end,
+})
+
+Night1:CreateSlider({
+    Name = "Порог топлива",
+    Range = {0, 100},
+    Increment = 5,
+    Suffix = " %",
+    CurrentValue = G.RM_FuelThreshold,
+    Flag = "RM_FuelThreshold",
+    Callback = function(v)
+        G.RM_FuelThreshold = v
+    end,
+})
+
+Night1:CreateButton({
+    Name = "Заправить сейчас (вручную)",
+    Callback = function()
+        if fuelManual() then
+            notify("Заправка: еду за канистрой к генератору", 4)
+        else
+            notify("Идёт другое действие — подожди секунду", 3)
+        end
+    end,
+})
+
+Night1:CreateSection("Электрика")
+Night1:CreateToggle({
+    Name = "Auto electric",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_AutoElectric = v
+        if v and typeof(fireclickdetector) ~= "function" then
+            notify("Auto electric: в экзекуторе нет fireclickdetector", 5)
+        else
+            notify("Auto electric: " .. (v and "ON" or "OFF"), 2)
+        end
+    end,
+})
+
+local Night2 = Window:CreateTab("Ночь 2", 4483362458) -- пусто
+
+local Night3 = Window:CreateTab("Ночь 3", 4483362458)
+Night3:CreateSection("Аимбот")
+Night3:CreateKeybind({
+    Name = "Бинд аимбота (зажать)",
+    CurrentKeybind = "C",
+    HoldToInteract = true,
+    Flag = "RM_BindAim",
+    Callback = function(on)
+        G.RM_AimMonster = (on == true)
     end,
 })
 
@@ -1844,8 +1921,6 @@ ESP:CreateColorPicker({
         end
     end,
 })
-ESP:CreateLabel("Монстры: модель с Humanoid (не игрок); мутанты — по имени. Метка: имя, дистанция, HP.")
-
 ESP:CreateSection("Предметы")
 ESP:CreateToggle({
     Name = "Item ESP",
@@ -1876,9 +1951,6 @@ ESP:CreateSlider({
         G.RM_ActionDelay = v
     end,
 })
-ESP:CreateLabel("Скорость действий: кулдауны автозабора и авто-заправки (0.1–5 с; меньше = быстрее, но игра даёт ~3с)")
-
-ESP:CreateLabel("Автозабор: телепорт к предмету → взять → обратно. Для сервера — «стоял рядом и забрал».")
 local pickToggle
 pickToggle = ESP:CreateToggle({
     Name = "Auto pickup",
@@ -1899,89 +1971,12 @@ pickDD = ESP:CreateDropdown({
         G.RM_PickList = opt or {"Все"}
     end,
 })
-ESP:CreateLabel("Что забирать: можно выбрать несколько. «Все» = всё подряд.")
-
 ESP:CreateKeybind({
     Name = "Бинд Auto pickup",
     CurrentKeybind = "H",
     Flag = "RM_BindPick",
     Callback = function()
         pickToggle:Set(not G.RM_AutoPickup)
-    end,
-})
-
-ESP:CreateSection("Генератор")
-ESP:CreateLabel("Автотопливо: телепорт к JerryCan → взять → к Generator → подать топливо → обратно. Паузы — «Скорость действий»")
-local fuelToggle
-fuelToggle = ESP:CreateToggle({
-    Name = "Auto fuel",
-    CurrentValue = false,
-    Callback = function(v)
-        G.RM_AutoFuel = v
-        if v and typeof(fireclickdetector) ~= "function" then
-            notify("Auto fuel: в экзекуторе нет fireclickdetector — нажимать нечем", 5)
-        else
-            notify("Auto fuel: " .. (v and "ON" or "OFF"), 2)
-        end
-    end,
-})
-
-ESP:CreateKeybind({
-    Name = "Бинд Auto fuel",
-    CurrentKeybind = "J",
-    Flag = "RM_BindFuel",
-    Callback = function()
-        fuelToggle:Set(not G.RM_AutoFuel)
-    end,
-})
-
-ESP:CreateSlider({
-    Name = "Порог топлива",
-    Range = {0, 100},
-    Increment = 5,
-    Suffix = " %",
-    CurrentValue = G.RM_FuelThreshold,
-    Flag = "RM_FuelThreshold",
-    Callback = function(v)
-        G.RM_FuelThreshold = v
-    end,
-})
-ESP:CreateLabel("Порог: авто-заправка бежит только когда топлива меньше заданного (0 = никогда, 100 = всегда). Не постоянно — а когда меньше порога.")
-ESP:CreateButton({
-    Name = "Заправить сейчас (вручную)",
-    Callback = function()
-        if fuelManual() then
-            notify("Заправка: еду за канистрой к генератору", 4)
-        else
-            notify("Идёт другое действие — подожди секунду", 3)
-        end
-    end,
-})
-
-ESP:CreateSection("Электрика")
-ESP:CreateToggle({
-    Name = "Auto electric",
-    CurrentValue = false,
-    Callback = function(v)
-        G.RM_AutoElectric = v
-        if v and typeof(fireclickdetector) ~= "function" then
-            notify("Auto electric: в экзекуторе нет fireclickdetector", 5)
-        else
-            notify("Auto electric: " .. (v and "ON" or "OFF"), 2)
-        end
-    end,
-})
-ESP:CreateLabel("Провода: нет ключа (Wrench) → телепорт к WrenchGiver за ним → открываем ящик → чиним подсвеченный провод. Автозабор электрику не трогает.")
-
-ESP:CreateSection("Аимбот")
-ESP:CreateLabel("Аимбот на монстра: зажми бинд — камера наводится на ближайшего монстра/мутанта (до 200 м)")
-ESP:CreateKeybind({
-    Name = "Бинд аимбота (зажать)",
-    CurrentKeybind = "C",
-    HoldToInteract = true,
-    Flag = "RM_BindAim",
-    Callback = function(on)
-        G.RM_AimMonster = (on == true)
     end,
 })
 
@@ -2067,9 +2062,7 @@ SettingsTab:CreateDropdown({
         notify("Камера: " .. tostring(v), 2)
     end,
 })
-SettingsTab:CreateLabel("1-е лицо — всегда впереди; 3-е — камера позади; «Как в игре» не трогает камеру.")
 
-SettingsTab:CreateLabel("— Кастомизация темы ELITE HUB —")
 
 SettingsTab:CreateColorPicker({
     Name = "Акцент",
@@ -2138,6 +2131,5 @@ pcall(function()
     })
 end)
 
-SettingsTab:CreateLabel("Окно перетаскивается за шапку. Тема сохраняется в конфиге.")
 
-print("[RESIDENCE MASSACRE] v4.5 rayfield loaded | электрика (ключ Wrench → ящик → провода) | плавный телепорт Tween везде | порог топлива + «Заправить сейчас» | лестницы | туман | бинды + аимбот | ESP | камера 1/3 | Settings")
+print("[RESIDENCE MASSACRE] v4.6 rayfield loaded | вкладки по ночам: Ночь 1 = генератор+электрика, Ночь 3 = аимбот | подписи убраны | плавный телепорт Tween | бинды + аимбот | ESP | камера 1/3 | Settings")
