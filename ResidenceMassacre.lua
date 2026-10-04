@@ -1,11 +1,9 @@
 -- ============================================================
---  ELITE HUB | Residence Massacre (Fullbright + TP Speed)
+--  ELITE HUB | Residence Massacre (Fullbright + TP Speed + Stamina)
 --  GUI на библиотеке Rayfield (как в Fort Blox).
---  Клиентские свойства Lighting + перемещение персонажа
---  телепортом корпуса (TP walk) — WalkSpeed НЕ трогаем, сервер
---  видит телепорт позиции, а не скорость.
---  Античит НЕ обходим: полный bright без спама записей,
---  скорость-телепорт включается вручную и на свой риск.
+--  Клиентские свойства Lighting + TP walk скорость + авто-лок
+--  стамины (поиск stam/energy и удержание на максимуме).
+--  Античит НЕ обходим: всё включается вручную и на свой риск.
 --
 --  Repo:   https://github.com/blegbot1/ResidenceMassacre
 --  Запуск: loadstring(game:HttpGet("https://raw.githubusercontent.com/blegbot1/ResidenceMassacre/refs/heads/main/ResidenceMassacre.lua",true))()
@@ -33,6 +31,7 @@ G.RM_NoFog = G.RM_NoFog ~= nil and G.RM_NoFog or true -- без тумана/т�
 G.RM_Poll = G.RM_Poll or 1                            -- как часто возвращать значения (сек)
 G.RM_TPSpeed = false                                  -- TP walk (ВЫКЛ по умолчанию)
 G.RM_TPSpeedVal = G.RM_TPSpeedVal or 50               -- скорость телепорта, studs/s
+G.RM_StaminaLock = false                              -- infinite stamina (ВЫКЛ по умолчанию)
 
 -- ================= применение =================
 -- пишем свойство ТОЛЬКО если оно реально отличается.
@@ -157,6 +156,69 @@ RunService.RenderStepped:Connect(function(dt)
 
         hrp.CFrame = CFrame.new(np) * (hrp.CFrame - hrp.CFrame.Position)
     end)
+end)
+
+-- ================= infinite stamina (автопоиск + лок) =================
+-- Не знаем, где в игре стамина: ищем типичные имена (stam/energy/fatigue)
+-- среди NumberValue/IntValue внутри игрока и персонажа и держим на
+-- максимуме. Пишем ТОЛЬКО при отличии, чтобы не спамить в сеть.
+-- Если найдено несколько кандидатов — локкаются все.
+G.RM_StaminaLock = G.RM_StaminaLock or false
+local stamNames = {"stam", "stmina", "energy", "fatigue", "sprint", "endurance"}
+local stamCache = {}
+local stamNotified, stamFoundOnce = false, false
+
+local function isStamCandidate(v)
+    if not (v:IsA("NumberValue") or v:IsA("IntValue") or v:IsA("IntConstrainedValue")) then
+        return false
+    end
+    local n = string.lower(v.Name)
+    for _, s in ipairs(stamNames) do
+        if string.find(n, s, 1, true) then return true end
+    end
+    return false
+end
+
+local function lockStamina()
+    local roots = {LP, LP.Character}
+    local found = 0
+    for _, r in ipairs(roots) do
+        if r then
+            for _, d in ipairs(r:GetDescendants()) do
+                if isStamCandidate(d) then
+                    found = found + 1
+                    local ok, cur = pcall(function() return d.Value end)
+                    if ok and type(cur) == "number" then
+                        local mx = stamCache[d] or cur
+                        if cur > mx then mx = cur end
+                        stamCache[d] = mx
+                        if cur < mx - 0.01 then
+                            pcall(function() d.Value = mx end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return found
+end
+
+task.spawn(function()
+    while true do
+        if G.RM_StaminaLock then
+            pcall(function()
+                local found = lockStamina()
+                if found == 0 and not stamNotified then
+                    stamNotified = true
+                    print("[RM] Стамина не найдена — ищу stam/energy/fatigue в игроке и персонаже. Если стамина в модуле/атрибуте — скажи имя поля")
+                elseif found > 0 and not stamFoundOnce then
+                    stamFoundOnce = true
+                    print("[RM] Стамина найдена и заблокирована: " .. found .. " value(s)")
+                end
+            end)
+        end
+        task.wait(0.3)
+    end
 end)
 
 -- ================= Rayfield =================
@@ -355,6 +417,21 @@ Main:CreateSlider({
 
 Main:CreateLabel("Speed (TP walk): сервер видит телепорты, не скорость — но и телепорты могут палиться")
 
+-- ===== Infinite stamina (автопоиск) =====
+-- без флага: не сохраняется в конфиг, всегда стартует выключенным
+Main:CreateToggle({
+    Name = "Infinite stamina",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_StaminaLock = v
+        if v then
+            notify("Stamina lock ON — ищу stam/energy и держу на максе", 4)
+        else
+            notify("Stamina lock OFF", 2)
+        end
+    end,
+})
+
 -- ================= главный цикл =================
 -- Опрос раз в секунду: реже = меньше нагрузки и риска кика.
 -- setProp пишет только при реальном отличии, в покое нагрузка нулевая.
@@ -367,4 +444,4 @@ task.spawn(function()
     end
 end)
 
-print("[RESIDENCE MASSACRE] v3.2 rayfield loaded | Fullbright выключается — возвращает оригинальный свет | TP выключен по умолчанию")
+print("[RESIDENCE MASSACRE] v3.3 rayfield loaded | Fullbright + TP Speed + Stamina lock | всё выключено по умолчанию")
