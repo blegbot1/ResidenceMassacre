@@ -11,9 +11,9 @@
 --  Запуск: loadstring(game:HttpGet("https://raw.githubusercontent.com/blegbot1/ResidenceMassacre/refs/heads/main/ResidenceMassacre.lua",true))()
 -- ============================================================
 
--- Place ID Residence Massacre.
--- Заполни, чтобы скрипт работал ТОЛЬКО в этой игре (nil = в любой).
-local ONLY_PLACE_ID = nil
+-- Place ID Residence Massacre (оригинал + обновлённый, ID из RMxploitt).
+-- Пустой список {} = скрипт стартует в любой игре.
+local ONLY_PLACE_IDS = { 14896802601, 16667550979 }
 
 local Players = game:GetService("Players")
 local Lighting = game:GetService("Lighting")
@@ -21,7 +21,7 @@ local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
 local LP = Players.LocalPlayer
 
-if ONLY_PLACE_ID and game.PlaceId ~= ONLY_PLACE_ID then
+if #ONLY_PLACE_IDS > 0 and not table.find(ONLY_PLACE_IDS, game.PlaceId) then
     warn("[RM] это не Residence Massacre (PlaceId " .. tostring(game.PlaceId) .. ") — выход")
     return
 end
@@ -501,10 +501,13 @@ task.spawn(function()
     end
 end)
 
--- ===== Anti-Freeze: не замерзать (значения Temperature/Freeze) =====
--- Как стамина: пишем ТОЛЬКО при отличии — постоянные записи дают
--- десинк и кик (Error 267). Константы из рабочего RM Helper.
+-- ===== Anti-Freeze: не замерзать =====
+-- В игре Character.Temperature — это LocalScript (гасим Enabled, по данным
+-- RMxploitt); старый вариант ждал .Value числом и молча ничего не делал.
+-- Значения Temperature/Freeze тоже держим, но ТОЛЬКО при отличии —
+-- постоянные записи дают десинк и кик (Error 267).
 G.RM_AntiFreeze = false -- без флага: всегда стартует выключенным
+local tempScriptOff = false -- выключили ли мы LocalScript (чтобы вернуть)
 task.spawn(function()
     while true do
         if getgenv().RM_Run ~= RUN_ID then return end
@@ -513,7 +516,13 @@ task.spawn(function()
                 local ch = LP.Character
                 if ch then
                     local t = ch:FindFirstChild("Temperature", true)
-                    if t and typeof(t.Value) == "number" and t.Value ~= 20 then
+                    if t and (t:IsA("LocalScript") or t:IsA("Script")) then
+                        if t.Enabled then
+                            t.Enabled = false
+                            tempScriptOff = true
+                        end
+                    elseif t and typeof(t.Value) == "number"
+                        and t.Value ~= 20 then
                         t.Value = 20
                     end
                     local f = ch:FindFirstChild("Freeze", true)
@@ -526,6 +535,45 @@ task.spawn(function()
         task.wait(0.5)
     end
 end)
+
+-- ===== Бесконечный кислород (Breath) =====
+-- Как стамина: Max-атрибут + значение, запись только при отличии;
+-- заодно глушим Blur и HeavyBreath (как в RMxploitt, но аккуратнее).
+G.RM_InfO2 = false
+task.spawn(function()
+    while true do
+        if getgenv().RM_Run ~= RUN_ID then return end
+        if G.RM_InfO2 then
+            pcall(function()
+                local ch = LP.Character
+                local b = ch and ch:FindFirstChild("Breath", true)
+                if b then
+                    if b:GetAttribute("Max") ~= 999999 then
+                        b:SetAttribute("Max", 999999)
+                    end
+                    if typeof(b.Value) == "number" and b.Value ~= 999999 then
+                        b.Value = 999999
+                    end
+                end
+                local blur = Lighting:FindFirstChild("Blur")
+                if blur and blur:IsA("BlurEffect") and blur.Enabled then
+                    blur.Enabled = false
+                end
+                local snds = workspace:FindFirstChild("Sounds")
+                local hb = snds and snds:FindFirstChild("HeavyBreath")
+                if hb then
+                    if hb.Looped then hb.Looped = false end
+                    if hb.Playing then hb.Playing = false end
+                end
+            end)
+        end
+        task.wait(0.5)
+    end
+end)
+
+-- ===== Auto Scare: Ларри у окна → флешка (подключение в GUI «Ночь 1») =====
+G.RM_AutoScare = false
+local scareConn = nil
 
 -- Noclip: подключается тоглом в GUI (здесь только состояние)
 G.RM_Noclip = false
@@ -1412,9 +1460,15 @@ local function wireBroken(w)
             res = true
         end
         if not res then
+            -- у битого провода «Sparkles» включён (в игре это объект с
+            -- Enabled — ParticleEmitter/PointLight); значение берём как есть
             local sp = w:FindFirstChild("Sparkles", true)
-            if sp and sp:IsA("Sparkles") and sp.Enabled then
-                res = true
+            if sp then
+                if typeof(sp.Enabled) == "boolean" then
+                    res = sp.Enabled
+                elseif typeof(sp.Value) == "boolean" then
+                    res = sp.Value
+                end
             end
         end
     end)
@@ -1451,8 +1505,10 @@ local function brokenWires()
     local out = {}
     for _, w in ipairs(wires:GetChildren()) do
         if w:IsA("Model") or w:IsA("Folder") or w:IsA("BasePart") then
-            local cd = w:FindFirstChildWhichIsA("ClickDetector", true)
-            if cd and wireBroken(w) then
+            if wireBroken(w) then
+                -- CD может не быть: кликаем ремоутом ClickWire (так делает
+                -- рабочий RMxploitt), CD — запасной вариант
+                local cd = w:FindFirstChildWhichIsA("ClickDetector", true)
                 out[#out + 1] = { model = w, cd = cd }
             end
         end
@@ -1585,8 +1641,31 @@ task.spawn(function()
                                     if tool and hum and tool.Parent ~= ch then
                                         hum:EquipTool(tool)
                                     end
-                                    elecTP(hrp, w.cd.Position, 2)
-                                    pcall(function() fireclickdetector(w.cd) end)
+                                    local pos = (w.cd and w.cd.Position)
+                                        or (w.model:IsA("BasePart")
+                                            and w.model.Position)
+                                        or (w.model.PrimaryPart
+                                            and w.model.PrimaryPart.Position)
+                                    if pos then elecTP(hrp, pos, 2) end
+                                    -- сначала ремоут ClickWire (проверенный
+                                    -- путь RMxploitt), без него — ClickDetector
+                                    local cr = nil
+                                    pcall(function()
+                                        local rf = game:FindFirstChild(
+                                            "ReplicatedStorage")
+                                        rf = rf and rf:FindFirstChild("Remotes")
+                                        cr = rf and rf:FindFirstChild(
+                                            "ClickWire")
+                                    end)
+                                    if cr then
+                                        pcall(function()
+                                            cr:FireServer(w.model)
+                                        end)
+                                    elseif w.cd then
+                                        pcall(function()
+                                            fireclickdetector(w.cd)
+                                        end)
+                                    end
                                     task.wait(tonumber(G.RM_ActionDelay) or 0.1)
                                 end)
                                 -- кулдауны ставим всегда: после ошибки не
@@ -2045,6 +2124,25 @@ PlayerTab:CreateKeybind({
     end,
 })
 
+PlayerTab:CreateSection("Кислород")
+local o2Toggle
+o2Toggle = PlayerTab:CreateToggle({
+    Name = "Infinite O2",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_InfO2 = v
+        notify("Infinite O2: " .. (v and "ON" or "OFF"), 2)
+    end,
+})
+PlayerTab:CreateKeybind({
+    Name = "Бинд Infinite O2",
+    CurrentKeybind = "V",
+    Flag = "RM_BindO2",
+    Callback = function()
+        o2Toggle:Set(not G.RM_InfO2)
+    end,
+})
+
 PlayerTab:CreateSection("Температура")
 local freezeToggle
 freezeToggle = PlayerTab:CreateToggle({
@@ -2052,6 +2150,17 @@ freezeToggle = PlayerTab:CreateToggle({
     CurrentValue = false,
     Callback = function(v)
         G.RM_AntiFreeze = v
+        if not v and tempScriptOff then
+            -- вернуть LocalScript Temperature, который мы погасили
+            pcall(function()
+                local ch = LP.Character
+                local t = ch and ch:FindFirstChild("Temperature", true)
+                if t and (t:IsA("LocalScript") or t:IsA("Script")) then
+                    t.Enabled = true
+                end
+            end)
+            tempScriptOff = false
+        end
         notify("Anti-Freeze: " .. (v and "ON" or "OFF"), 2)
     end,
 })
@@ -2108,6 +2217,23 @@ PlayerTab:CreateKeybind({
     Flag = "RM_BindNoclip",
     Callback = function()
         noclipToggle:Set(not G.RM_Noclip)
+    end,
+})
+
+PlayerTab:CreateSection("Прочее")
+PlayerTab:CreateButton({
+    Name = "Снять анкор (разморозка)",
+    Callback = function()
+        pcall(function()
+            local ch = LP.Character
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            if hrp and hrp.Anchored then
+                hrp.Anchored = false
+                notify("Анкор снят", 2)
+            else
+                notify("Персонаж не заанкорен", 2)
+            end
+        end)
     end,
 })
 
@@ -2221,6 +2347,114 @@ Night1:CreateToggle({
     end,
 })
 
+Night1:CreateSection("Камин")
+Night1:CreateButton({
+    Name = "Подбросить дрова",
+    Callback = function()
+        if pickupBusy then
+            notify("Занято — идёт другое действие", 2)
+            return
+        end
+        local ch = LP.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        if not hrp then
+            notify("Нет персонажа", 2)
+            return
+        end
+        local wp = workspace:FindFirstChild("WoodPile")
+        local det = wp and wp:FindFirstChild("Detector", true)
+        local cd = det and det:FindFirstChildWhichIsA("ClickDetector", true)
+        if not cd then
+            notify("Дровяная кучка не найдена", 3)
+            print("[RM] камин: WoodPile/Detector/ClickDetector нет")
+            return
+        end
+        local origin = hrp.CFrame
+        pickupBusy = true
+        local ok, err = pcall(function()
+            if det:IsA("BasePart") then det.CanCollide = false end
+            smoothTP(hrp, CFrame.new(-27.149, 8.7, -118.612))
+            task.wait(0.25)
+            fireclickdetector(cd)
+            task.wait(0.25)
+            smoothTP(hrp, CFrame.new(-45.114, 7.85, -60.241))
+            task.wait(0.5)
+        end)
+        pcall(function() smoothTP(hrp, origin) end)
+        pickupBusy = false
+        if ok then
+            notify("Дрова подброшены в камин", 2)
+        else
+            print("[RM] камин: " .. tostring(err))
+            notify("Камин: ошибка — смотри консоль", 3)
+        end
+    end,
+})
+
+Night1:CreateSection("Камера")
+Night1:CreateToggle({
+    Name = "Auto Scare (флешка при Ларри у окна)",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_AutoScare = v
+        if v then
+            scareConn = workspace.ChildAdded:Connect(function(obj)
+                if getgenv().RM_Run ~= RUN_ID then return end
+                if not G.RM_AutoScare then return end
+                if obj.Name ~= "Mutant" then return end
+                local inside = false
+                pcall(function()
+                    local cfg = obj:FindFirstChild("Config")
+                    local w = cfg and cfg:FindFirstChild("Wandering")
+                    inside = (w ~= nil and w.Value == false)
+                end)
+                if inside then
+                    notify("Ларри у окна — флешка через 1.5с", 3)
+                    task.delay(1.5, function()
+                        if getgenv().RM_Run == RUN_ID and G.RM_AutoScare then
+                            pcall(function()
+                                local rf = game:FindFirstChild(
+                                    "ReplicatedStorage")
+                                rf = rf and rf:FindFirstChild("Remotes")
+                                local fc = rf
+                                    and rf:FindFirstChild("FlashCam")
+                                if fc then fc:FireServer("1") end
+                            end)
+                        end
+                    end)
+                else
+                    notify("Ларри появился снаружи", 3)
+                end
+            end)
+            notify("Auto Scare ON (нужна установленная камера)", 3)
+        else
+            if scareConn then
+                scareConn:Disconnect()
+                scareConn = nil
+            end
+            notify("Auto Scare OFF", 2)
+        end
+    end,
+})
+Night1:CreateButton({
+    Name = "Флешнуть камеру",
+    Callback = function()
+        local ok, err = pcall(function()
+            local rf = game:FindFirstChild("ReplicatedStorage")
+            rf = rf and rf:FindFirstChild("Remotes")
+            local fc = rf and rf:FindFirstChild("FlashCam")
+            if not fc then error("нет ремоута FlashCam") end
+            fc:FireServer("1")
+        end)
+        if ok then
+            notify("Флешка (камера 1)", 2)
+        else
+            print("[RM] FlashCam: " .. tostring(err))
+            notify("FlashCam: ошибка — смотри консоль", 3)
+        end
+    end,
+})
+
 local Night2 = Window:CreateTab("Ночь 2", 4483362458)
 Night2:CreateSection("Генератор")
 local cellToggle
@@ -2246,6 +2480,74 @@ Night2:CreateKeybind({
     Flag = "RM_BindCell",
     Callback = function()
         cellToggle:Set(not G.RM_AutoCell)
+    end,
+})
+
+Night2:CreateSection("Ремоуты")
+local function n2Fire(remoteName, ...)
+    local args = { ... } -- ... нельзя брать внутри вложенной функции
+    local ok, err = pcall(function()
+        local rf = game:FindFirstChild("ReplicatedStorage")
+        rf = rf and rf:FindFirstChild("Remotes")
+        local r = rf and rf:FindFirstChild(remoteName)
+        if not r then error("нет ремоута " .. remoteName) end
+        r:FireServer(unpack(args))
+    end)
+    return ok, err
+end
+for i = 1, 4 do
+    local n = tostring(i)
+    Night2:CreateButton({
+        Name = "Починить провод " .. n,
+        Callback = function()
+            local ok, err = n2Fire("Repair", n)
+            if ok then
+                notify("Провод " .. n .. ": отправлен (если RepairWorker жив)",
+                    3)
+            else
+                print("[RM] Ночь 2 Repair: " .. tostring(err))
+                notify("Repair: ошибка — смотри консоль", 3)
+            end
+        end,
+    })
+end
+for _, item in ipairs({ "Camera", "Lock", "UVLamp", "MotionSensor" }) do
+    local nm = item
+    Night2:CreateButton({
+        Name = "Доставка: " .. nm,
+        Callback = function()
+            local ok, err = n2Fire("Delivery", nm)
+            if ok then
+                notify("Доставка заказана: " .. nm, 2)
+            else
+                print("[RM] Ночь 2 Delivery: " .. tostring(err))
+                notify("Delivery: ошибка — смотри консоль", 3)
+            end
+        end,
+    })
+end
+Night2:CreateButton({
+    Name = "Escape-Snatch (вырваться)",
+    Callback = function()
+        local ok, err = n2Fire("EscapeSnatch")
+        if ok then
+            notify("Попытка вырваться", 2)
+        else
+            print("[RM] EscapeSnatch: " .. tostring(err))
+            notify("Ошибка — смотри консоль", 3)
+        end
+    end,
+})
+Night2:CreateButton({
+    Name = "Revive (воскрешение)",
+    Callback = function()
+        local ok, err = n2Fire("LoadCharacter")
+        if ok then
+            notify("Воскрешение...", 2)
+        else
+            print("[RM] LoadCharacter: " .. tostring(err))
+            notify("Ошибка — смотри консоль", 3)
+        end
     end,
 })
 
@@ -2314,7 +2616,7 @@ local function tpBtnNames(title, names, offset)
     })
 end
 
--- координаты (из RM Helper): дом и фабрика
+-- координаты: дом/фабрика из RM Helper, доп. точки из RMxploitt
 local LOC = {
     home     = CFrame.new(-34.18, 9.54, -47.09),
     living   = CFrame.new(-30.45, 9.54, -48.73),
@@ -2331,6 +2633,19 @@ local LOC = {
     n2tower  = CFrame.new(-95.80, 6.17, -100.50),
     n2office = CFrame.new(-60.30, 6.17, -110.40),
     sn2      = CFrame.new(-78.81, 19.27, -134.28),
+    -- доп. точки Ночи 1 (RMxploitt)
+    entrance = CFrame.new(-11.036, 7.73, -31.822),
+    woodpile = CFrame.new(-27.149, 8.7, -118.612),
+    fireplace= CFrame.new(-45.114, 7.85, -60.241),
+    barricade= CFrame.new(-43.144, 25.3, -68.021),
+    shackgen = CFrame.new(-76.039, 4.675, -133.78),
+    -- Ночь 2, новая карта (RMxploitt, y≈82)
+    n2main   = CFrame.new(-304.235, 82.4, -6.777),
+    n2entr   = CFrame.new(-217.417, 82.4, 65.412),
+    n2corr1  = CFrame.new(-303.846, 82.4, 50.169),
+    n2corr2  = CFrame.new(-293.11, 82.4, -89.501),
+    n2board  = CFrame.new(-282.224, 82.4, 14.674),
+    n2safe   = CFrame.new(-339.321, 82.4, -40.622),
 }
 
 TPTab:CreateSection("Ночь 1 — дом")
@@ -2358,6 +2673,21 @@ tpBtn("Офис", LOC.n2office)
 
 TPTab:CreateSection("Ночь 2 — укрытие")
 tpBtn("Укрытие (Ночь 2)", LOC.sn2)
+
+TPTab:CreateSection("Ночь 2 — новая карта")
+tpBtn("Главный зал", LOC.n2main)
+tpBtn("Вход", LOC.n2entr)
+tpBtn("Коридор 1", LOC.n2corr1)
+tpBtn("Коридор 2", LOC.n2corr2)
+tpBtn("Доска доставок", LOC.n2board)
+tpBtn("Укрытие (далеко)", LOC.n2safe)
+
+TPTab:CreateSection("Ночь 1 — доп. точки")
+tpBtn("Вход в дом", LOC.entrance)
+tpBtn("Дровяная кучка", LOC.woodpile)
+tpBtn("Камин", LOC.fireplace)
+tpBtn("Баррикады", LOC.barricade)
+tpBtn("Генератор (Shack)", LOC.shackgen)
 
 TPTab:CreateSection("Ночь 3 — лагерь")
 tpBtnNames("Лодж", {"Lodge", "MainLodge"}, Vector3.new(0, 5, 10))
@@ -2638,4 +2968,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.13 rayfield loaded | ТП-вкладка (50 точек из RM Helper) | Anti-Freeze + Noclip (бинды M/F) | Ночь 2 = Auto PowerCell | Ночь 1 = генератор+электрика, Ночь 3 = аимбот | быстрые твины/кулдауны | страховка pickupBusy | вкладка Игрок | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.14 rayfield loaded | Place ID (2 ID) | Anti-Freeze через LocalScript + Infinite O2 (V) + Noclip (F) | Auto Scare (флешка) | Ночь 1: камин, Ночь 2: проводы/доставка/Escape/Revive | ТП: новая карта Н2 | Ночь 2 = Auto PowerCell | Ночь 3 = аимбот | страховка pickupBusy | вкладка Игрок | ESP | Settings")
