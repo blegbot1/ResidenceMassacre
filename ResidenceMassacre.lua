@@ -52,23 +52,54 @@ local function setProp(obj, name, value)
     end)
 end
 
+-- оригинальные значения освещения, снятые при запуске:
+-- выключение fullbright/no-fog должно ВОЗВРАЩАТЬ темноту,
+-- а не оставлять наши записи висеть
+local ORIG = {}
+local BRIGHT = {"Brightness", "ClockTime", "Ambient", "OutdoorAmbient",
+    "ColorShift_Top", "ColorShift_Bottom", "ExposureCompensation",
+    "EnvironmentDiffuseScale", "EnvironmentSpecularScale"}
+local FOG = {"GlobalShadows", "FogStart", "FogEnd", "FogColor"}
+for _, name in ipairs(BRIGHT) do
+    local ok, v = pcall(function() return Lighting[name] end)
+    if ok then ORIG[name] = v end
+end
+for _, name in ipairs(FOG) do
+    local ok, v = pcall(function() return Lighting[name] end)
+    if ok then ORIG[name] = v end
+end
+
+local function restoreGroup(list)
+    for _, name in ipairs(list) do
+        local v = ORIG[name]
+        if v ~= nil then setProp(Lighting, name, v) end
+    end
+end
+
 local function applyLight()
-    if not G.RM_FB then return end
-    local b = G.RM_Bright or 3
-    setProp(Lighting, "Brightness", b)
-    setProp(Lighting, "ClockTime", 14)
-    setProp(Lighting, "Ambient", Color3.fromRGB(200, 200, 200))
-    setProp(Lighting, "OutdoorAmbient", Color3.fromRGB(200, 200, 200))
-    setProp(Lighting, "ColorShift_Top", Color3.fromRGB(255, 255, 255))
-    setProp(Lighting, "ColorShift_Bottom", Color3.fromRGB(255, 255, 255))
-    setProp(Lighting, "ExposureCompensation", 0.4)
-    setProp(Lighting, "EnvironmentDiffuseScale", 1)
-    setProp(Lighting, "EnvironmentSpecularScale", 0)
+    -- fullbright (или возврат оригинала)
+    if G.RM_FB then
+        local b = G.RM_Bright or 3
+        setProp(Lighting, "Brightness", b)
+        setProp(Lighting, "ClockTime", 14)
+        setProp(Lighting, "Ambient", Color3.fromRGB(200, 200, 200))
+        setProp(Lighting, "OutdoorAmbient", Color3.fromRGB(200, 200, 200))
+        setProp(Lighting, "ColorShift_Top", Color3.fromRGB(255, 255, 255))
+        setProp(Lighting, "ColorShift_Bottom", Color3.fromRGB(255, 255, 255))
+        setProp(Lighting, "ExposureCompensation", 0.4)
+        setProp(Lighting, "EnvironmentDiffuseScale", 1)
+        setProp(Lighting, "EnvironmentSpecularScale", 0)
+    else
+        restoreGroup(BRIGHT)
+    end
+    -- no fog / shadows (или возврат оригинала)
     if G.RM_NoFog then
         setProp(Lighting, "GlobalShadows", false)
         setProp(Lighting, "FogStart", -100000)
         setProp(Lighting, "FogEnd", 100000)
         setProp(Lighting, "FogColor", Color3.fromRGB(255, 255, 255))
+    else
+        restoreGroup(FOG)
     end
 end
 
@@ -336,4 +367,4 @@ task.spawn(function()
     end
 end)
 
-print("[RESIDENCE MASSACRE] v3.1 rayfield loaded | Fullbright + TP Speed | TP выключен по умолчанию")
+print("[RESIDENCE MASSACRE] v3.2 rayfield loaded | Fullbright выключается — возвращает оригинальный свет | TP выключен по умолчанию")
