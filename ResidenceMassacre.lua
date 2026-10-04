@@ -1,8 +1,9 @@
 -- ============================================================
---  ELITE HUB | Residence Massacre (Fullbright + TP Speed + Stamina)
+--  ELITE HUB | Residence Massacre (Fullbright + TP Speed +
+--  Stamina + Mutant ESP)
 --  GUI на библиотеке Rayfield (как в Fort Blox).
---  Клиентские свойства Lighting + TP walk скорость + авто-лок
---  стамины (поиск stam/energy и удержание на максимуме).
+--  Клиентские свойства Lighting + TP walk + лок стамины +
+--  ESP мутанта (Highlight + метка через стены).
 --  Античит НЕ обходим: всё включается вручную и на свой риск.
 --
 --  Repo:   https://github.com/blegbot1/ResidenceMassacre
@@ -249,6 +250,118 @@ task.spawn(function()
     end
 end)
 
+-- ================= Mutant ESP =================
+-- Красный хайлайт + метка (дистанция и HP) через стены.
+-- Без постоянного сканирования: разовый поиск + события
+-- DescendantAdded/Removing на спавн и десавн мутанта.
+G.RM_MutantESP = G.RM_MutantESP or false
+G.RM_MutantColor = G.RM_MutantColor or Color3.fromRGB(255, 40, 40)
+
+local mutantCache = {} -- array {model, hl, gui, lbl}
+local inCache = {}     -- model -> true
+
+local function isMutantModel(m)
+    return typeof(m) == "Instance" and m:IsA("Model")
+        and string.find(string.lower(m.Name), "mutant", 1, true) ~= nil
+end
+
+local function addMutant(m)
+    if inCache[m] or not m.Parent then return end
+    local pg = LP:FindFirstChildOfClass("PlayerGui")
+    if not pg then return end
+    inCache[m] = true
+
+    local hl = Instance.new("Highlight")
+    hl.Name = "RM_MutantHL"
+    hl.FillColor = G.RM_MutantColor
+    hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+    hl.FillTransparency = 0.55
+    hl.OutlineTransparency = 0
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Adornee = m
+    hl.Parent = pg
+
+    local gui = Instance.new("BillboardGui")
+    gui.Name = "RM_MutantLabel"
+    gui.Size = UDim2.fromOffset(220, 34)
+    gui.AlwaysOnTop = true
+    gui.MaxDistance = 1000000
+    gui.Parent = pg
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Name = "Text"
+    lbl.Size = UDim2.fromScale(1, 1)
+    lbl.BackgroundTransparency = 1
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextColor3 = G.RM_MutantColor
+    lbl.TextStrokeTransparency = 0
+    lbl.TextSize = 14
+    lbl.Text = "MUTANT"
+    lbl.Parent = gui
+
+    mutantCache[#mutantCache + 1] = {model = m, hl = hl, gui = gui, lbl = lbl}
+end
+
+local function removeMutant(m)
+    if not inCache[m] then return end
+    inCache[m] = nil
+    for i = #mutantCache, 1, -1 do
+        local e = mutantCache[i]
+        if e.model == m then
+            pcall(function() e.hl:Destroy() end)
+            pcall(function() e.gui:Destroy() end)
+            table.remove(mutantCache, i)
+        end
+    end
+end
+
+-- первичный поиск
+pcall(function()
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if isMutantModel(d) then addMutant(d) end
+    end
+end)
+-- спавн/десавн — без периодического скана
+workspace.DescendantAdded:Connect(function(obj)
+    if isMutantModel(obj) then addMutant(obj) end
+end)
+workspace.DescendantRemoving:Connect(function(obj)
+    if inCache[obj] then removeMutant(obj) end
+end)
+
+RunService.RenderStepped:Connect(function()
+    pcall(function()
+        local on = G.RM_MutantESP
+        local lpch = LP.Character
+        local myHRP = lpch and lpch:FindFirstChild("HumanoidRootPart")
+        for i = #mutantCache, 1, -1 do
+            local e = mutantCache[i]
+            local m = e.model
+            if not m or not m.Parent then
+                pcall(function() e.hl:Destroy() end)
+                pcall(function() e.gui:Destroy() end)
+                if m then inCache[m] = nil end
+                table.remove(mutantCache, i)
+            else
+                local show = false
+                if on and myHRP then
+                    local root = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChild("Head")
+                    if root then
+                        local dist = (root.Position - myHRP.Position).Magnitude
+                        local hum = m:FindFirstChildOfClass("Humanoid")
+                        local hp = (hum and hum.Health > 0) and math.floor(hum.Health) or "?"
+                        e.lbl.Text = ("MUTANT [%dm] HP %s"):format(math.floor(dist), tostring(hp))
+                        e.gui.Adornee = root
+                        show = true
+                    end
+                end
+                e.hl.Enabled = show
+                e.gui.Enabled = show
+            end
+        end
+    end)
+end)
+
 -- ================= Rayfield =================
 local Rayfield = nil
 local rayUrls = {
@@ -460,6 +573,34 @@ Main:CreateToggle({
     end,
 })
 
+-- ===== Mutant ESP =====
+Main:CreateToggle({
+    Name = "Mutant ESP",
+    CurrentValue = G.RM_MutantESP,
+    Flag = "RM_MutantESP",
+    Callback = function(v)
+        G.RM_MutantESP = v
+        notify("Mutant ESP: " .. (v and "ON" or "OFF"), 2)
+    end,
+})
+
+Main:CreateColorPicker({
+    Name = "Mutant ESP color",
+    Color = G.RM_MutantColor,
+    Flag = "RM_MutantColor",
+    Callback = function(v)
+        G.RM_MutantColor = v
+        for _, e in ipairs(mutantCache) do
+            pcall(function()
+                e.hl.FillColor = v
+                e.lbl.TextColor3 = v
+            end)
+        end
+    end,
+})
+
+Main:CreateLabel("Mutant ESP: хайлайт и метка HP видны сквозь стены")
+
 -- ================= главный цикл =================
 -- Опрос раз в секунду: реже = меньше нагрузки и риска кика.
 -- setProp пишет только при реальном отличии, в покое нагрузка нулевая.
@@ -472,4 +613,4 @@ task.spawn(function()
     end
 end)
 
-print("[RESIDENCE MASSACRE] v3.4 rayfield loaded | Fullbright + TP Speed + Stamina (разовое обнаружение) | всё выключено по умолчанию")
+print("[RESIDENCE MASSACRE] v3.5 rayfield loaded | Fullbright + TP Speed + Stamina + Mutant ESP | всё выключено по умолчанию")
