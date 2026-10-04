@@ -168,6 +168,31 @@ local stamNames = {"stam", "stmina", "energy", "fatigue", "sprint", "endurance"}
 local stamRef = nil     -- {v=Instance, max=number, path=string}
 local stamNoteOnce = false
 
+-- плашка внизу экрана: показывает, что бесконечная стамина ВКЛ
+local stamStatus = Instance.new("TextLabel")
+do
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "RM_StaminaStatus"
+    sg.ResetOnSpawn = false
+    sg.DisplayOrder = 998
+    sg.Parent = LP:WaitForChild("PlayerGui")
+
+    stamStatus.Name = "Status"
+    stamStatus.AnchorPoint = Vector2.new(0.5, 1)
+    stamStatus.Position = UDim2.new(0.5, 0, 1, -20)
+    stamStatus.Size = UDim2.fromOffset(260, 24)
+    stamStatus.BackgroundColor3 = Color3.fromRGB(18, 14, 28)
+    stamStatus.BackgroundTransparency = 0.3
+    stamStatus.BorderSizePixel = 0
+    stamStatus.Font = Enum.Font.GothamBold
+    stamStatus.TextColor3 = Color3.fromRGB(120, 255, 140)
+    stamStatus.TextSize = 13
+    stamStatus.Text = "БЕСКОНЕЧНАЯ СТАМИНА: ВКЛ"
+    stamStatus.Visible = false
+    Instance.new("UICorner", stamStatus).CornerRadius = UDim.new(0, 6)
+    stamStatus.Parent = sg
+end
+
 local function isStamCandidate(v)
     if not (v:IsA("NumberValue") or v:IsA("IntValue") or v:IsA("IntConstrainedValue")) then
         return false
@@ -223,6 +248,9 @@ end
 
 task.spawn(function()
     while true do
+        pcall(function()
+            stamStatus.Visible = G.RM_StaminaLock == true
+        end)
         if G.RM_StaminaLock then
             pcall(function()
                 -- значение исчезло (респавн) -> переобнаружение
@@ -231,10 +259,9 @@ task.spawn(function()
                     local r = discoverStaminaOnce()
                     if r then
                         stamRef = r
-                        print(("[RM] Стамина зафиксирована: %s (max %s) — больше не сканирую"):format(r.path, tostring(r.max)))
                     elseif not stamNoteOnce then
                         stamNoteOnce = true
-                        print("[RM] Стамина не найдена (ищу stam/energy/fatigue). Если она в модуле/атрибуте — подскажи имя")
+                        print("[RM] Стамина: значение не найдено — если не работает, скажи имя поля из Explorer")
                     end
                 end
                 -- крутим только одну ссылку, пишем только при отличии
@@ -579,9 +606,12 @@ Main:CreateToggle({
     CurrentValue = false,
     Callback = function(v)
         G.RM_StaminaLock = v
+        pcall(function() stamStatus.Visible = v end)
         if v then
+            print("[RM] Бесконечная стамина: ВКЛ")
             notify("Stamina ON — побегай 2-3 секунды, скрипт зафиксирует значение", 5)
         else
+            print("[RM] Бесконечная стамина: ВЫКЛ")
             notify("Stamina OFF", 2)
         end
     end,
@@ -627,4 +657,4 @@ task.spawn(function()
     end
 end)
 
-print("[RESIDENCE MASSACRE] v3.6 rayfield loaded | Fullbright + TP Speed + Stamina + Mutant ESP (постоянный скан 1с) | всё выключено по умолчанию")
+print("[RESIDENCE MASSACRE] v3.7 rayfield loaded | Fullbright + TP Speed + Stamina + Mutant ESP | статус стамины внизу экрана")
