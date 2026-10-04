@@ -60,9 +60,9 @@ G.RM_TPSpeed = false                                  -- TP walk (ВЫКЛ по 
 G.RM_TPSpeedVal = G.RM_TPSpeedVal or 50               -- скорость телепорта, studs/s
 G.RM_StaminaLock = false                              -- infinite stamina (ВЫКЛ по умолчанию)
 G.RM_CamMode = G.RM_CamMode or "game"                 -- камера: game / first / third
-G.RM_ActionDelay = G.RM_ActionDelay or 3               -- задержка действий, с (кулдауны)
+G.RM_ActionDelay = G.RM_ActionDelay or 0.1             -- задержка действий, с (кулдауны; слайдер 0.03..5)
 G.RM_FuelThreshold = G.RM_FuelThreshold or 50          -- авто-заправка ниже уровня, % (100 = всегда)
-G.RM_TweenSpeed = G.RM_TweenSpeed or 150               -- скорость плавных телепортов, студ/с
+G.RM_TweenSpeed = G.RM_TweenSpeed or 500               -- скорость плавных телепортов, студ/с
 local pickupBusy = false                              -- идёт автозабор (TP walk ждёт)
 
 -- ================= применение =================
@@ -86,15 +86,15 @@ end
 -- ================= плавный телепорт (TweenService) =================
 -- Все телепорты (автозабор, авто-заправка, электрика) летят плавно:
 -- tween по CFrame HumanoidRootPart, скорость — слайдер «Скорость
--- твинов» (G.RM_TweenSpeed, по умолчанию 150 студ/с, 0.15–3 с).
+-- твинов» (G.RM_TweenSpeed, по умолчанию 500 студ/с, 0.05–3 с).
 -- TP walk не тут: он и так двигает каждый кадр маленькими шажками.
 local TweenService = game:GetService("TweenService")
 
 local function smoothTP(hrp, cf, dur)
     if not dur then
-        local spd = tonumber(G.RM_TweenSpeed) or 150
+        local spd = tonumber(G.RM_TweenSpeed) or 500
         dur = math.clamp(
-            (cf.Position - hrp.Position).Magnitude / spd, 0.15, 3)
+            (cf.Position - hrp.Position).Magnitude / spd, 0.05, 3)
     end
     pcall(function()
         local tw = TweenService:Create(hrp,
@@ -990,14 +990,14 @@ local function doPickup(e)
             teleported = true
         end
     end)
-    if teleported then task.wait(0.15) end -- позиция успевает дойти до сервера
+    if teleported then task.wait(0.1) end -- позиция успевает дойти до сервера
     pcall(function() fireItem(e) end)
     e.clickAt = os.clock() -- кулдаун по каждой цели — из слайдера «Скорость действий»
     if teleported then
-        task.wait(0.1)
+        task.wait(0.05)
         pcall(function() smoothTP(hrp, origin) end)
     end
-    task.wait(0.15)
+    task.wait(0.1)
     pickupBusy = false
 end
 
@@ -1036,7 +1036,7 @@ task.spawn(function()
                             -- электрику не трогаем — ею занимается Auto electric
                             and not isElectric(e.inst)
                             and (not e.clickAt or os.clock() - e.clickAt
-                                >= (tonumber(G.RM_ActionDelay) or 3))
+                                >= (tonumber(G.RM_ActionDelay) or 0.1))
                             and pickSelected(e.itemName) then
                             local pos = itemPos(e)
                             if pos then
@@ -1088,7 +1088,7 @@ local function fuelPress(hrp, pos, cd)
             smoothTP(hrp, CFrame.new(pos + Vector3.new(0, 3, 0))
                 * (hrp.CFrame - hrp.CFrame.Position))
         end)
-        task.wait(0.15) -- позиция успевает дойти до сервера
+        task.wait(0.1) -- позиция успевает дойти до сервера
     end
     if typeof(fireclickdetector) == "function" then
         pcall(function() fireclickdetector(cd) end)
@@ -1186,13 +1186,13 @@ task.spawn(function()
                             if wantCan then
                                 pressedCan = fuelPress(hrp, can:GetPivot().Position, cdCan)
                                 if pressedCan then lastCanAt = os.clock() end
-                                task.wait(tonumber(G.RM_ActionDelay) or 3) -- кулдаун канистры
+                                task.wait(tonumber(G.RM_ActionDelay) or 0.1) -- кулдаун канистры
                             end
                             local canReady = pressedCan or held
                                 or ((os.clock() - lastCanAt) < 15)
                             if G.RM_AutoFuel and cdGen and canReady then
                                 fuelPress(hrp, gen:GetPivot().Position, cdGen)
-                                task.wait(tonumber(G.RM_ActionDelay) or 3) -- кулдаун подачи топлива
+                                task.wait(tonumber(G.RM_ActionDelay) or 0.1) -- кулдаун подачи топлива
                             end
                         end)
                         -- возвращаемся всегда, даже после ошибки
@@ -1227,7 +1227,7 @@ local function fuelManual()
             local gen, cdGen = findByModelName("generator")
             if not (gen and cdGen) then error("генератор не найден") end
             if not (can and cdCan) then error("канистра не найдена") end
-            local delay = tonumber(G.RM_ActionDelay) or 3
+            local delay = tonumber(G.RM_ActionDelay) or 0.1
             if not can:IsDescendantOf(ch) then
                 fuelPress(hrp, can:GetPivot().Position, cdCan)
                 lastCanAt = os.clock()
@@ -1342,7 +1342,7 @@ end
 local function elecTP(hrp, worldPos, height)
     smoothTP(hrp, CFrame.new(worldPos + Vector3.new(0, height or 2, 0))
         * (hrp.CFrame - hrp.CFrame.Position))
-    task.wait(0.15)
+    task.wait(0.1)
 end
 
 local function elecClickBox(hrp, origin)
@@ -1353,7 +1353,7 @@ local function elecClickBox(hrp, origin)
         elecTP(hrp, bcd.Position, 2)
         pcall(function() fireclickdetector(bcd) end)
         fuseOpened = not fuseOpened
-        task.wait(0.5)
+        task.wait(0.3)
     end)
     -- возвращаемся всегда, даже после ошибки (респавн/исчез объект)
     pcall(function() smoothTP(hrp, origin) end)
@@ -1420,7 +1420,7 @@ task.spawn(function()
                             local okW, errW = pcall(function()
                                 elecTP(hrp, gcd.Position, 3)
                                 pcall(function() fireclickdetector(gcd) end)
-                                task.wait(1) -- выдача инструмента
+                                task.wait(0.6) -- выдача инструмента
                             end)
                             wrenchGetAt = os.clock()
                             pcall(function() smoothTP(hrp, origin) end)
@@ -1465,7 +1465,7 @@ task.spawn(function()
                                     end
                                     elecTP(hrp, w.cd.Position, 2)
                                     pcall(function() fireclickdetector(w.cd) end)
-                                    task.wait(tonumber(G.RM_ActionDelay) or 3)
+                                    task.wait(tonumber(G.RM_ActionDelay) or 0.1)
                                 end)
                                 -- кулдауны ставим всегда: после ошибки не
                                 -- должно быть мгновенного повтора по кругу
@@ -1874,13 +1874,13 @@ PlayerTab:CreateSlider({
     end,
 })
 
+-- без флага: всегда стартует с дефолта 500 (минимальное время твина)
 PlayerTab:CreateSlider({
     Name = "Скорость твинов",
-    Range = {50, 500},
+    Range = {50, 1000},
     Increment = 10,
     Suffix = " st/s",
     CurrentValue = G.RM_TweenSpeed,
-    Flag = "RM_TweenSpeed",
     Callback = function(v)
         G.RM_TweenSpeed = v
     end,
@@ -1924,13 +1924,13 @@ PlayerTab:CreateKeybind({
 })
 
 PlayerTab:CreateSection("Автозабор")
+-- без флага: всегда стартует с дефолта 0.1с; слайдер опускается до 0.03
 PlayerTab:CreateSlider({
     Name = "Скорость действий",
-    Range = {0.1, 5},
-    Increment = 0.1,
+    Range = {0.03, 5},
+    Increment = 0.01,
     Suffix = " s",
     CurrentValue = G.RM_ActionDelay,
-    Flag = "RM_ActionDelay",
     Callback = function(v)
         G.RM_ActionDelay = v
     end,
@@ -2281,4 +2281,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.10 rayfield loaded | страховка зависшего pickupBusy (30с) | фикс зависания pickupBusy | защита от повторного запуска | отладка электрики в консоли | вкладка Игрок | Ночь 1 = генератор+электрика, Ночь 3 = аимбот | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.11 rayfield loaded | быстрые твины (500 ст/с, от 0.05с) + кулдауны 0.03–5с (дефолт 0.1с) | страховка pickupBusy | защита от повторного запуска | отладка электрики | вкладка Игрок | Ночь 1 = генератор+электрика, Ночь 3 = аимбот | ESP | Settings")
