@@ -1713,10 +1713,14 @@ Main:CreateSlider({
     end,
 })
 
--- ===== Speed через TP walk (WalkSpeed не трогаем) =====
--- без флага: не сохраняется в конфиг, всегда стартует выключенным
+-- ================= вкладка Игрок (скорость, стамина, автозабор) =================
+local PlayerTab = Window:CreateTab("Игрок", 4483362458)
+
+PlayerTab:CreateSection("Скорость")
+-- Speed через TP walk (WalkSpeed не трогаем):
+-- без флага, всегда стартует выключенным
 local speedToggle
-speedToggle = Main:CreateToggle({
+speedToggle = PlayerTab:CreateToggle({
     Name = "Speed (TP walk)",
     CurrentValue = false,
     Callback = function(v)
@@ -1729,7 +1733,7 @@ speedToggle = Main:CreateToggle({
     end,
 })
 
-Main:CreateSlider({
+PlayerTab:CreateSlider({
     Name = "TP speed",
     Range = {10, 300},
     Increment = 5,
@@ -1740,7 +1744,7 @@ Main:CreateSlider({
     end,
 })
 
-Main:CreateKeybind({
+PlayerTab:CreateKeybind({
     Name = "Бинд TP speed",
     CurrentKeybind = "B",
     Flag = "RM_BindSpeed",
@@ -1749,10 +1753,10 @@ Main:CreateKeybind({
     end,
 })
 
--- ===== Infinite stamina (автопоиск) =====
--- без флага: не сохраняется в конфиг, всегда стартует выключенным
+PlayerTab:CreateSection("Стамина")
+-- без флага, всегда стартует выключенным
 local stamToggle
-stamToggle = Main:CreateToggle({
+stamToggle = PlayerTab:CreateToggle({
     Name = "Infinite stamina",
     CurrentValue = false,
     Callback = function(v)
@@ -1768,12 +1772,55 @@ stamToggle = Main:CreateToggle({
     end,
 })
 
-Main:CreateKeybind({
+PlayerTab:CreateKeybind({
     Name = "Бинд стамины",
     CurrentKeybind = "N",
     Flag = "RM_BindStam",
     Callback = function()
         stamToggle:Set(not G.RM_StaminaLock)
+    end,
+})
+
+PlayerTab:CreateSection("Автозабор")
+PlayerTab:CreateSlider({
+    Name = "Скорость действий",
+    Range = {0.1, 5},
+    Increment = 0.1,
+    Suffix = " s",
+    CurrentValue = G.RM_ActionDelay,
+    Flag = "RM_ActionDelay",
+    Callback = function(v)
+        G.RM_ActionDelay = v
+    end,
+})
+
+local pickToggle
+pickToggle = PlayerTab:CreateToggle({
+    Name = "Auto pickup",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_AutoPickup = v
+        notify("Auto pickup: " .. (v and "ON" or "OFF"), 2)
+    end,
+})
+pickDD = PlayerTab:CreateDropdown({
+    Name = "Что забирать",
+    Options = pickOptions(),
+    CurrentOption = G.RM_PickList,
+    MultipleOptions = true,
+    Flag = "RM_PickList",
+    Callback = function(opt)
+        if typeof(opt) == "string" then opt = {opt} end
+        G.RM_PickList = opt or {"Все"}
+    end,
+})
+
+PlayerTab:CreateKeybind({
+    Name = "Бинд Auto pickup",
+    CurrentKeybind = "H",
+    Flag = "RM_BindPick",
+    Callback = function()
+        pickToggle:Set(not G.RM_AutoPickup)
     end,
 })
 
@@ -1858,7 +1905,7 @@ Night3:CreateKeybind({
     end,
 })
 
--- ================= вкладка ESP (весь ESP + автозабор) =================
+-- ================= вкладка ESP (только ESP) =================
 local ESP = Window:CreateTab("ESP", 4483362458)
 
 ESP:CreateSection("Игроки")
@@ -1937,46 +1984,6 @@ ESP:CreateColorPicker({
     Flag = "RM_ItemColor",
     Callback = function(v)
         G.RM_ItemColor = v
-    end,
-})
-
-ESP:CreateSlider({
-    Name = "Скорость действий",
-    Range = {0.1, 5},
-    Increment = 0.1,
-    Suffix = " s",
-    CurrentValue = G.RM_ActionDelay,
-    Flag = "RM_ActionDelay",
-    Callback = function(v)
-        G.RM_ActionDelay = v
-    end,
-})
-local pickToggle
-pickToggle = ESP:CreateToggle({
-    Name = "Auto pickup",
-    CurrentValue = false,
-    Callback = function(v)
-        G.RM_AutoPickup = v
-        notify("Auto pickup: " .. (v and "ON" or "OFF"), 2)
-    end,
-})
-pickDD = ESP:CreateDropdown({
-    Name = "Что забирать",
-    Options = pickOptions(),
-    CurrentOption = G.RM_PickList,
-    MultipleOptions = true,
-    Flag = "RM_PickList",
-    Callback = function(opt)
-        if typeof(opt) == "string" then opt = {opt} end
-        G.RM_PickList = opt or {"Все"}
-    end,
-})
-ESP:CreateKeybind({
-    Name = "Бинд Auto pickup",
-    CurrentKeybind = "H",
-    Flag = "RM_BindPick",
-    Callback = function()
-        pickToggle:Set(not G.RM_AutoPickup)
     end,
 })
 
@@ -2132,4 +2139,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.6 rayfield loaded | вкладки по ночам: Ночь 1 = генератор+электрика, Ночь 3 = аимбот | подписи убраны | плавный телепорт Tween | бинды + аимбот | ESP | камера 1/3 | Settings")
+print("[RESIDENCE MASSACRE] v4.7 rayfield loaded | вкладка Игрок (спид+стамина+автозабор) | Ночь 1 = генератор+электрика, Ночь 3 = аимбот | подписи убраны | плавный телепорт Tween | ESP | камера 1/3 | Settings")
