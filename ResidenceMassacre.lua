@@ -252,7 +252,7 @@ end)
 
 -- ================= Mutant ESP =================
 -- Красный хайлайт + метка (дистанция и HP) через стены.
--- Без постоянного сканирования: разовый поиск + события
+-- Постоянный скан workspace раз в 1с + события
 -- DescendantAdded/Removing на спавн и десавн мутанта.
 G.RM_MutantESP = G.RM_MutantESP or false
 G.RM_MutantColor = G.RM_MutantColor or Color3.fromRGB(255, 40, 40)
@@ -321,12 +321,25 @@ pcall(function()
         if isMutantModel(d) then addMutant(d) end
     end
 end)
--- спавн/десавн — без периодического скана
+-- спавн/десавн — события для быстрой реакции
 workspace.DescendantAdded:Connect(function(obj)
     if isMutantModel(obj) then addMutant(obj) end
 end)
 workspace.DescendantRemoving:Connect(function(obj)
     if inCache[obj] then removeMutant(obj) end
+end)
+-- ПОСТОЯННЫЙ скан: ловит переименования и спавны, которые
+-- события не покрывают (модель появилась под другим именем
+-- и была переименована в Mutant). Раз в секунду.
+task.spawn(function()
+    while true do
+        pcall(function()
+            for _, d in ipairs(workspace:GetDescendants()) do
+                if isMutantModel(d) then addMutant(d) end
+            end
+        end)
+        task.wait(1)
+    end
 end)
 
 RunService.RenderStepped:Connect(function()
@@ -337,7 +350,8 @@ RunService.RenderStepped:Connect(function()
         for i = #mutantCache, 1, -1 do
             local e = mutantCache[i]
             local m = e.model
-            if not m or not m.Parent then
+            if not m or not m.Parent or not isMutantModel(m) then
+                -- удалена или переименована — убираем метку и хайлайт
                 pcall(function() e.hl:Destroy() end)
                 pcall(function() e.gui:Destroy() end)
                 if m then inCache[m] = nil end
@@ -613,4 +627,4 @@ task.spawn(function()
     end
 end)
 
-print("[RESIDENCE MASSACRE] v3.5 rayfield loaded | Fullbright + TP Speed + Stamina + Mutant ESP | всё выключено по умолчанию")
+print("[RESIDENCE MASSACRE] v3.6 rayfield loaded | Fullbright + TP Speed + Stamina + Mutant ESP (постоянный скан 1с) | всё выключено по умолчанию")
