@@ -1,0 +1,1 @@
+v4.1: предметы по любому ClickDetector/Prompt (починен пустой Item ESP и автозабор), кулдаун 3с по цели, Auto fuel JerryCan->Generator с телепортом рядом

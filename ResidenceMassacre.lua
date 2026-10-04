@@ -596,49 +596,43 @@ local function espRemove(inst)
     end
 end
 
--- ===== предметы ItemSpots =====
-local itemContainer = nil
+-- ===== предметы / интерактив =====
+-- Не привязываемся к структуре папок: предмет = ЛЮБОЙ ClickDetector
+-- или ProximityPrompt в workspace (ItemSpots/BloxyCola, Food, JerryCan,
+-- Generator...). Владелец = модель-контейнер или ближайший предок-модель.
 local itemNames = {} -- lowername -> имя для выпадашки
 
-local function refreshItemContainer()
-    if itemContainer and itemContainer.Parent then return end
-    itemContainer = nil
-    pcall(function()
-        itemContainer = workspace:FindFirstChild("ItemSpots")
-        if not itemContainer then
-            for _, d in ipairs(workspace:GetDescendants()) do
-                if d:IsA("Folder") and string.lower(d.Name) == "itemspots" then
-                    itemContainer = d
-                    break
-                end
-            end
+local GENERIC_NAMES = {
+    spot = true, part = true, model = true, main = true,
+    handle = true, block = true, item = true,
+}
+
+-- имя для метки/выпадашки: у обезличенного контейнера ("Spot"/"Part")
+-- берём имя вложенной модели предмета (BloxyCola/Food/...)
+local function displayName(owner)
+    if not owner:IsA("Model") then return owner.Name end
+    if not GENERIC_NAMES[string.lower(owner.Name)] then return owner.Name end
+    for _, ch in ipairs(owner:GetChildren()) do
+        if ch:IsA("Model") and ch:FindFirstChild("Handle", true) then
+            return ch.Name
         end
-    end)
+    end
+    return owner.Name
 end
 
--- что лежит в Spot: моделька предмета с Handle + с кем взаимодействовать
-local function itemInfo(spot)
-    local root, name = nil, nil
-    for _, ch in ipairs(spot:GetChildren()) do
-        if ch:IsA("Model") and ch:FindFirstChild("Handle", true) then
-            root, name = ch, ch.Name
-            break
-        end
+-- кому принадлежит взаимодействие: сама модель или предок-модель.
+-- персонажи игроков и NPC пропускаем — у них свои типы ESP.
+local function interactOwner(obj)
+    local par = obj.Parent
+    if not par then return nil end
+    local m = par
+    if not par:IsA("Model") then
+        m = par:FindFirstAncestorOfClass("Model")
     end
-    if not root and spot:FindFirstChild("Handle", true) then
-        root, name = spot, spot.Name
-    end
-    if not root then return nil end
-    local cd = root:FindFirstChildWhichIsA("ClickDetector", true)
-        or spot:FindFirstChildWhichIsA("ClickDetector", true)
-    local prompt = spot:FindFirstChildWhichIsA("ProximityPrompt", true)
-        or root:FindFirstChildWhichIsA("ProximityPrompt", true)
-    local equipRE = spot:FindFirstChildOfClass("RemoteEvent")
-        or root:FindFirstChildOfClass("RemoteEvent")
-    local equipRF = spot:FindFirstChildOfClass("RemoteFunction")
-        or root:FindFirstChildOfClass("RemoteFunction")
-    return {root = root, name = name, cd = cd, prompt = prompt,
-        equipRE = equipRE, equipRF = equipRF}
+    if not m then return par end
+    if Players:GetPlayerFromCharacter(m) then return nil end
+    if m:FindFirstChildOfClass("Humanoid") then return nil end
+    return m
 end
 
 local function pickOptions()
@@ -657,30 +651,41 @@ local function pickOptions()
 end
 
 local function scanItems()
-    refreshItemContainer()
-    if not itemContainer then return end
     local seen = {}
+    local interact = {} -- owner -> {cd=, prompt=}
     local newName = false
-    for _, spot in ipairs(itemContainer:GetChildren()) do
-        if spot:IsA("Model") then
-            local info = itemInfo(spot)
-            if info then
-                seen[info.root] = true
-                local key = string.lower(info.name)
-                if not itemNames[key] then
-                    itemNames[key] = info.name
-                    newName = true
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("ClickDetector") or d:IsA("ProximityPrompt") then
+            local owner = interactOwner(d)
+            if owner and owner.Parent then
+                seen[owner] = true
+                local it = interact[owner]
+                if not it then
+                    it = {}
+                    interact[owner] = it
                 end
-                if not espBy[info.root] then espAdd(info.root, "item") end
-                local e = espBy[info.root]
-                if e then
-                    e.itemName = info.name
-                    e.cd = info.cd
-                    e.prompt = info.prompt
-                    e.equipRE = info.equipRE
-                    e.equipRF = info.equipRF
+                if d:IsA("ClickDetector") then
+                    it.cd = d
+                else
+                    it.prompt = d
                 end
             end
+        end
+    end
+    -- зарегистрировать/обновить найденные предметы
+    for owner, it in pairs(interact) do
+        local nm = displayName(owner)
+        local key = string.lower(nm)
+        if not itemNames[key] then
+            itemNames[key] = nm
+            newName = true
+        end
+        if not espBy[owner] then espAdd(owner, "item") end
+        local e = espBy[owner]
+        if e then
+            e.itemName = nm
+            e.cd = it.cd
+            e.prompt = it.prompt
         end
     end
     -- предмет исчез (забрали / респавн) — убираем метку
@@ -737,6 +742,11 @@ workspace.DescendantAdded:Connect(function(obj)
         local k = modelKind(obj)
         if k and not espBy[obj] then espAdd(obj, k) end
     end
+    -- появился ClickDetector/Prompt (предмет/канистра/генератор) —
+    -- сразу ресканим предметы, не ждём секундного скана
+    if obj:IsA("ClickDetector") or obj:IsA("ProximityPrompt") then
+        task.defer(function() pcall(scanItems) end)
+    end
 end)
 workspace.DescendantRemoving:Connect(function(obj)
     if espBy[obj] then espRemove(obj) end
@@ -764,16 +774,6 @@ local function fireItem(e)
     end
     if e.cd and typeof(fireclickdetector) == "function" then
         pcall(function() fireclickdetector(e.cd) end)
-        fired = true
-    end
-    if e.equipRE then
-        pcall(function() e.equipRE:FireServer() end)
-        fired = true
-    end
-    if e.equipRF then
-        task.spawn(function()
-            pcall(function() e.equipRF:InvokeServer() end)
-        end)
         fired = true
     end
     if not fired and (e.prompt or e.cd) and not fireWarned then
@@ -831,6 +831,7 @@ local function doPickup(e)
     end)
     if teleported then task.wait(0.15) end -- позиция успевает дойти до сервера
     pcall(function() fireItem(e) end)
+    e.clickAt = os.clock() -- кулдаун 3с по каждой цели (как в игре)
     if teleported then
         task.wait(0.1)
         pcall(function() hrp.CFrame = origin end)
@@ -850,7 +851,11 @@ task.spawn(function()
                     local best, bestD = nil, math.huge
                     for _, e in ipairs(espCache) do
                         if e.kind == "item" and e.inst.Parent
-                            and (e.prompt or e.cd or e.equipRE or e.equipRF)
+                            and (e.prompt or e.cd)
+                            -- генератор не трогаем — им занимается Auto fuel
+                            and not string.find(string.lower(e.itemName or e.inst.Name),
+                                "generator", 1, true)
+                            and (not e.clickAt or os.clock() - e.clickAt >= 3)
                             and pickSelected(e.itemName) then
                             local pos = itemPos(e)
                             if pos then
@@ -866,6 +871,91 @@ task.spawn(function()
             end
         end)
         task.wait(0.4)
+    end
+end)
+
+-- ===== авто-топливо: JerryCan → Generator =====
+-- Схема: телепорт к канистре → взять (кулдаун ~3с стоим рядом) →
+-- телепорт к генератору → подать топливо (кулдаун ~3с) → обратно.
+-- Для сервера мы всё время стоим рядом с тем, что жмём.
+G.RM_AutoFuel = false -- без флага: всегда стартует выключенным
+local FUEL_CD = 3
+local lastCanAt = 0
+local fuelWarned = false
+
+-- ищем модель по части имени (generator / jerrycan) с её ClickDetector
+local function findByModelName(sub)
+    local low = string.lower(sub)
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("Model") and string.find(string.lower(d.Name), low, 1, true) then
+            local cd = d:FindFirstChildWhichIsA("ClickDetector", true)
+            if cd then
+                return d, cd
+            end
+        end
+    end
+    return nil, nil
+end
+
+-- встать рядом с целью (если далеко) и нажать её
+local function fuelPress(hrp, pos, cd)
+    local maxD = cd.MaxActivationDistance or 32
+    local dist = (pos - hrp.Position).Magnitude
+    if dist > math.max(maxD - 3, 2) then
+        pcall(function()
+            hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+                * (hrp.CFrame - hrp.CFrame.Position)
+        end)
+        task.wait(0.15) -- позиция успевает дойти до сервера
+    end
+    if typeof(fireclickdetector) == "function" then
+        pcall(function() fireclickdetector(cd) end)
+        return true
+    end
+    if not fuelWarned then
+        fuelWarned = true
+        print("[RM] В экзекуторе нет fireclickdetector — авто-заправка не сможет нажимать")
+    end
+    return false
+end
+
+task.spawn(function()
+    while true do
+        pcall(function()
+            if G.RM_AutoFuel and not pickupBusy then
+                local ch = LP.Character
+                local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local can, cdCan = findByModelName("jerrycan")
+                    local gen, cdGen = findByModelName("generator")
+                    -- канистра у нас в руках (модель внутри персонажа)
+                    local held = can and ch and can:IsDescendantOf(ch)
+                    local tookRecently = (os.clock() - lastCanAt) < 15
+                    -- брать канистру есть смысл только при наличии генератора
+                    local wantCan = (cdCan ~= nil) and (not held) and (cdGen ~= nil)
+                    local wantGen = (cdGen ~= nil) and (held or tookRecently)
+                    if wantCan or wantGen then
+                        pickupBusy = true
+                        local origin = hrp.CFrame
+                        local pressedCan = false
+                        if wantCan then
+                            pressedCan = fuelPress(hrp, can:GetPivot().Position, cdCan)
+                            if pressedCan then lastCanAt = os.clock() end
+                            task.wait(FUEL_CD) -- кулдаун канистры
+                        end
+                        local canReady = pressedCan or held
+                            or ((os.clock() - lastCanAt) < 15)
+                        if G.RM_AutoFuel and cdGen and canReady then
+                            fuelPress(hrp, gen:GetPivot().Position, cdGen)
+                            task.wait(FUEL_CD) -- кулдаун подачи топлива
+                        end
+                        pcall(function() hrp.CFrame = origin end)
+                        pickupBusy = false
+                    end
+                end
+            end
+        end)
+        task.wait(0.5)
     end
 end)
 
@@ -1320,6 +1410,21 @@ pickDD = ESP:CreateDropdown({
 })
 ESP:CreateLabel("Что забирать: можно выбрать несколько. «Все» = всё подряд.")
 
+ESP:CreateSection("Генератор")
+ESP:CreateLabel("Автотопливо: телепорт к JerryCan → взять (3с) → к Generator → подать топливо (3с) → обратно")
+ESP:CreateToggle({
+    Name = "Auto fuel",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_AutoFuel = v
+        if v and typeof(fireclickdetector) ~= "function" then
+            notify("Auto fuel: в экзекуторе нет fireclickdetector — нажимать нечем", 5)
+        else
+            notify("Auto fuel: " .. (v and "ON" or "OFF"), 2)
+        end
+    end,
+})
+
 -- ================= вкладка Settings (кастомизация темы) =================
 local SettingsTab = Window:CreateTab("Settings", 4483362458)
 
@@ -1475,4 +1580,4 @@ end)
 
 SettingsTab:CreateLabel("Окно перетаскивается за шапку. Тема сохраняется в конфиге.")
 
-print("[RESIDENCE MASSACRE] v4.0 rayfield loaded | ESP: игроки/монстры/предметы + автозабор | свет каждый кадр (без мерцания) | камера 1/3 | Settings")
+print("[RESIDENCE MASSACRE] v4.1 rayfield loaded | предметы по ClickDetector/Prompt + автозабор | Auto fuel (JerryCan->Generator) | ESP | свет без мерцания | камера 1/3 | Settings")
