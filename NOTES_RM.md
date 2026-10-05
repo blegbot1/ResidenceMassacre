@@ -22,6 +22,15 @@
   `LoadCharacter`, `FlashCam`, `Kick` (**Kick не трогать — это и есть античит**)
 - `ReplicatedStorage.GameState.FusesFried` (bool) — **true = свет вырубили**
   (= есть битые проводы). Ложится в гейт Auto electric.
+- `ReplicatedStorage.GameState.Blizzard` (bool) — модификатор метели; запись
+  клиента **локальная** (v4.30, из prolover — сервер правки не видит)
+- `ReplicatedStorage.GameState.Active` (bool) — цели ночи запущены (v4.30)
+- `ReplicatedStorage.Upgrades.Generator` — атрибуты `Max`/`Price` (апгрейды),
+  `ReplicatedStorage.Assets.UpgradeShop`/`Gambler` — магазин и гемблер лежат
+  в Assets (v4.30, из diddy: показ/лимиты — локально, сервер может валидировать
+  цену сам — экспериментальная кнопка)
+- `workspace.FrontDoor.SoundPart.Growling` (Sound) — `IsPlaying == true`,
+  пока мутант у входной двери (тревога двери, v4.30 из gueston)
 - `Character.Sprint.Stam` (+ Max-атрибут) — стамина
 - `Character.Breath` (+ Max-атрибут) — кислород; `workspace.Sounds.HeavyBreath`,
   `Lighting.Blur` — задыхание
@@ -44,6 +53,9 @@
 - `workspace.WoodPile.Detector` — дровяная кучка; камин — `-27.149, 8.7, -118.612`
 - Окно Ларри (Auto Scare) — Mutant рядом с `Config.Wandering == false` →
   `FlashCam:FireServer("1")`
+- `workspace.Radio.ClickDetector` — старт целей: клики до `GameState.Active`
+  (v4.30, из prolover; их точка перед радио `-34.354, 7.800, -58.370`
+  с поворотом; радио — прямой ребёнок workspace)
 
 ### Ночь 2
 - `PowerCell` — Model с `ClickDetector` **вне** Generator; вставка — клик по
@@ -54,6 +66,8 @@
 
 ### ESP / предметы
 - Любой `ClickDetector` / `ProximityPrompt` в workspace = предмет (Item ESP)
+- `WorkerHead` (Ночь 3) — часть/модель **без** ClickDetector: Item ESP метит
+  по имени (v4.30, из gueston); автозабор его не трогает (гейт `e.prompt or e.cd`)
 - Топливо/газ: ValueBase с `"fuel"`/`"gas"` в имени → потом атрибут → потом текст
 
 ### Фонарь / кабины (Ночь 3, gist yancielsicard2-arch)
@@ -93,6 +107,11 @@
 | TheGuestON / Pixeluted (GitHub) | ТП-точки (`FrontDoor/SoundPart/Growling`, ген `-79.725,4.675,-132.755`); Pixeluted старый (2023), содержит обходы (adonis/hookmetamethod) — только структуры |
 | ScriptBlox-снippets выдачи → **частично v4.19** | 55878: **kid detector** — СДЕЛАН (тогл «Детект ребёнка (GhostChild)», с v4.22 во вкладке **Воспоминания**, переехал из «Ночи 3»); 241706 auto-wire/Larry notifier — наш auto electric покрывает, notifier не делал; 61029 esp abomination — покрыто расширением Mutant ESP |
 | GitHub-скан (2026-10, новый проход) | новых работающих raw/gist/pastefy с кодом СВЕРХ известных не найдено; обф подтверждён: ApexScript0x/RM (MoonVeil 242КБ), manfac9000 (таблица `\068\066…`), flopa2677 (MoonSec); TheGuestON-лоадер → pastebin `PTg2vat8` = 404 |
+| residencemassacreprolover/rmprolover (GitHub, читаемый luau-проект mspaint/Obsidian, только Ночь 1) → **перенесено v4.30** | «Запустить цели (радио)» (их CF перед радио + `GameState.Active` с возвратом), «Отключить метель» (`GameState.Blizzard`), «Анти-лаг (Potato)» (Plastic/Reflectance/декали/вода, ORIG-значения в атрибутах). Не взято: Bypass Anticheat (`kick.Name` — красная линия), Trolling (`PlayerMutant` Kill/Trap, фонарь на игрока — гриф), бейджи Electrocuted/Asphyxia, Loop Flash камер (дубль «Флешнуть камеру»), Phase Through Doors (дубль Noclip) |
+| TheGuestON (GitHub, **обновлён 2026-07**, UniverseX) → **перенесено v4.30** | «Тревога двери» (`FrontDoor.SoundPart.Growling`, кулдаун 15с), `WorkerHead` в Item ESP (метка по имени — предмета без ClickDetector не было в ESP), ТП «Сейфзона» `(-14, 30, -122)`. Не взято: Window ESP (`Windows.Window[].Monster` + анимации — дубль Auto Scare), «Spawned Entity» (дубль уведомления Auto Scare) |
+| thediddydaddler1234/residence-massacre (GitHub, читаемый) → **перенесено v4.30** | кнопка «Бесплатные апгрейды (эксп.)»: `Upgrades.Generator` Max/Price + показ `UpgradeShop`/`Gambler` из `RS.Assets` |
+| krepkiioreshek14 / p1shenak (FONDI) / fish991×3 (Fiszok) / balios / gordu / dexter (2026-09 свежие) | мусор: копии с TP по ночам + Noclip (у нас всё есть глубже), FONDI — SpeedHack/Fly/God (против правил проекта), dexter — файл «test», balios — пусто; hanzo `Auto Spirit Helper` — wearedevs-обфускация |
+| rawscripts.net → KINGHUB01/BlackKing-obf (через furaf-лоадер с ключом `ScriptVault10`) | 96КБ: читаема только ESP-шапка (имя+дистанция+HP у игроков — уже есть), тело — PUC-обфускация: пропущено |
 
 ## Известные несделанное (осознанно)
 
@@ -124,6 +143,13 @@
 11. **Guard в каждом keybind-callback не нужен** — `Rayfield:Destroy()` на старой
     библиотеке рвёт `keybindConnections` целиком; свой `RUN_ID`-guard оставлен
     только в `panicTP` (yield внутри).
+12. **Гриф/дубли из чужих скриптов (v4.30-скан)** — `PlayerMutant` Kill/Trap,
+    «фонарь на игрока», Window ESP, «Spawned Entity», бейджи Electrocuted/
+    Asphyxia осознанно НЕ делаем: не полезно для прохождения, дублирует Auto
+    Scare или провоцирует других игроков.
+13. **Лимиты апгрейдов** — клиентская запись в ReplicatedStorage не
+    реплицируется на сервер; кнопка «Бесплатные апгрейды (эксп.)» ставит
+    атрибуты и честно сообщает, что сервер может цену валидировать сам.
 
 ## Правки-паттерны (повторять)
 

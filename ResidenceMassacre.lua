@@ -77,6 +77,38 @@ pcall(function()
     end
 end)
 G.RM_NoclipSaved = nil
+-- 2c) Анти-лаг (Potato) переживал re-run: тогл всегда OFF на старте,
+-- а детали остались Plastic — возвращаем по атрибутам RM_Pot* (v4.30)
+pcall(function()
+    for _, o in ipairs(workspace:GetDescendants()) do
+        if o:GetAttribute("RM_Pot") then
+            pcall(function()
+                o.Material = Enum.Material[
+                    o:GetAttribute("RM_PotMat") or "Plastic"]
+                o.Reflectance = o:GetAttribute("RM_PotRef") or 0
+            end)
+            o:ClearAttribute("RM_Pot")
+            o:ClearAttribute("RM_PotMat")
+            o:ClearAttribute("RM_PotRef")
+        elseif o:GetAttribute("RM_PotT") then
+            pcall(function()
+                o.Transparency = o:GetAttribute("RM_PotTrans") or 0
+            end)
+            o:ClearAttribute("RM_PotT")
+            o:ClearAttribute("RM_PotTrans")
+        end
+    end
+    local t = workspace:FindFirstChildOfClass("Terrain")
+    if t and t:GetAttribute("RM_PotW") then
+        pcall(function()
+            t.WaterReflectance = t:GetAttribute("RM_PotWr") or 1
+            t.WaterWaveSize = t:GetAttribute("RM_PotWw") or 0.05
+        end)
+        t:ClearAttribute("RM_PotW")
+        t:ClearAttribute("RM_PotWr")
+        t:ClearAttribute("RM_PotWw")
+    end
+end)
 -- 2b) Под-землю переживала re-run ещё хуже: кеш исходных коллизий
 -- (st.noclipWas) жил в замыкании СТАРОГО прогона и был недостижим —
 -- поднимать было нечем (п.1/215). Публикуем кеш в getgenv при
@@ -853,6 +885,12 @@ G.RM_CabinAlert = false
 local cabinConn = nil
 local cabinGen = 0 -- поколение подписки (гонка выкл/пока ждём ремоут)
 
+-- Тревога двери (v4.30, из gueston): мутант у входной двери — на клиенте
+-- слышен ров Growling на FrontDoor.SoundPart. Не conn, а нить-опрос:
+-- нить сама гаснет по G.RM_DoorAlert/RUN_ID, re-run дочищает сам
+G.RM_DoorAlert = false
+local doorAlertGen = 0
+
 -- Noclip: подключается тоглом в GUI (здесь только состояние)
 G.RM_Noclip = false
 local noclipConn = nil
@@ -1265,6 +1303,13 @@ local function scanItems()
                     it.prompt = d
                 end
             end
+        elseif d.Name == "WorkerHead"
+            and (d:IsA("BasePart") or d:IsA("Model")) then
+            -- голова рабочего (Ночь 3): предмет БЕЗ ClickDetector —
+            -- ESP-метка по имени (из gueston); в автозабор не идёт
+            -- (там гейт e.prompt or e.cd)
+            if not interact[d] then interact[d] = {} end
+            seen[d] = true
         end
     end
     -- зарегистрировать/обновить найденные предметы
@@ -1358,7 +1403,8 @@ espAddConn = workspace.DescendantAdded:Connect(function(obj)
     -- сразу ресканим предметы, не ждём секундного скана. Но дебаунс:
     -- при массовом спавне (волнами) полный обход workspace за КАЖДЫЙ
     -- объект давал микрофризы 5–20мс; секундный тик scanEsp всё доберёт
-    if obj:IsA("ClickDetector") or obj:IsA("ProximityPrompt") then
+    if obj:IsA("ClickDetector") or obj:IsA("ProximityPrompt")
+        or obj.Name == "WorkerHead" then
         task.defer(function()
             if getgenv().RM_Run ~= RUN_ID then return end
             if os.clock() - lastItemScan < 0.5 then return end
@@ -3596,6 +3642,45 @@ Night1:CreateButton({
     end,
 })
 
+-- из diddy (GitHub): магазин апгрейдов лежит в RS.Assets, лимиты
+-- генератора — атрибуты RS.Upgrades.Generator. Клиентские правки
+-- реплицируются не всегда — честный notify о результате
+Night1:CreateButton({
+    Name = "Бесплатные апгрейды (эксп.)",
+    Callback = function()
+        if not fireThrottle("Upgrades") then return end
+        local genFound, moved = false, 0
+        pcall(function()
+            local rs = game:FindFirstChild("ReplicatedStorage")
+            local up = rs and rs:FindFirstChild("Upgrades")
+            local gen = up and up:FindFirstChild("Generator")
+            if gen then
+                gen:SetAttribute("Max", 1e20)
+                gen:SetAttribute("Price", 0)
+                genFound = true
+            end
+            local assets = rs and rs:FindFirstChild("Assets")
+            if assets then
+                for _, nm in ipairs({"UpgradeShop", "Gambler"}) do
+                    local m = assets:FindFirstChild(nm)
+                    if m then
+                        m.Parent = workspace
+                        moved = moved + 1
+                    end
+                end
+            end
+        end)
+        if genFound then
+            notify("Апгрейды: лимиты сняты (Max=∞, Price=0) — локально", 4)
+            notify("Если сервер не доверяет клиенту, цену задаст он", 4)
+        elseif moved > 0 then
+            notify("Магазин апгрейдов показан локально", 3)
+        else
+            notify("ReplicatedStorage.Upgrades не найдено", 3)
+        end
+    end,
+})
+
 Night1:CreateSection("Электрика")
 Night1:CreateToggle({
     Name = "Auto electric",
@@ -3677,6 +3762,121 @@ Night1:CreateButton({
                 print("[RM] камин: " .. tostring(err))
                 notify("Камин: ошибка — смотри консоль", 3)
             end
+        end
+    end,
+})
+
+-- запуск целей Ночи 1: из prolover (Night 1) — ТП к радио и клики до
+-- GameState.Active. pickupBusy-гвард + возврат на место как у камина
+Night1:CreateSection("Старт ночи")
+Night1:CreateButton({
+    Name = "Запустить цели (радио)",
+    Callback = function()
+        if pickupBusy then
+            notify("Занято — идёт другое действие", 2)
+            return
+        end
+        if not fireThrottle("Radio") then return end
+        local ch = LP.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        if not hrp then
+            notify("Нет персонажа", 2)
+            return
+        end
+        local rs = game:FindFirstChild("ReplicatedStorage")
+        local gs = rs and rs:FindFirstChild("GameState")
+        local act = gs and gs:FindFirstChild("Active")
+        local radio = workspace:FindFirstChild("Radio")
+        local cd = radio and radio:FindFirstChild("ClickDetector")
+        if not (act and act:IsA("BoolValue")) then
+            notify("GameState.Active не найден — это не Ночь 1?", 3)
+            return
+        end
+        if act.Value then
+            notify("Цели уже активны", 2)
+            return
+        end
+        if not cd then
+            notify("Радио не найдено — не та карта?", 3)
+            return
+        end
+        local origin = hrp.CFrame
+        pickupBusy = true
+        local started = false
+        local ok, err = pcall(function()
+            G.RM_TP_Origin = { cf = origin, place = game.PlaceId }
+            -- точка prolover: перед радио (ориентация сохранена)
+            smoothTP(hrp, CFrame.new(-34.3541336, 7.79997444, -58.3701172,
+                0.619202912, -3.47004629e-08, -0.785230994,
+                5.68393368e-08, 1, 6.29901742e-10,
+                0.785230994, -4.50220448e-08, 0.619202912))
+            local t0 = os.clock()
+            while os.clock() - t0 < 12 do
+                if getgenv().RM_Run ~= RUN_ID then return end
+                if act.Value then
+                    started = true
+                    break
+                end
+                fireclickdetector(cd)
+                task.wait(0.5)
+            end
+            if act.Value then started = true end
+        end)
+        pcall(function() smoothTP(hrp, origin) end)
+        G.RM_TP_Origin = nil
+        pickupBusy = false
+        if getgenv().RM_Run == RUN_ID then
+            if ok and started then
+                notify("Цели Ночи 1 запущены", 3)
+            elseif ok then
+                notify("Радио молчит — цели не стартовали", 3)
+            else
+                print("[RM] радио: " .. tostring(err))
+                notify("Радио: ошибка — смотри консоль", 3)
+            end
+        end
+    end,
+})
+
+Night1:CreateSection("Погода")
+-- re-run: тогл всегда OFF на старте, а локально выключенная метель
+-- осталась бы — возвращаем исходное значение один раз при загрузке
+pcall(function()
+    local rs = game:FindFirstChild("ReplicatedStorage")
+    local gs = rs and rs:FindFirstChild("GameState")
+    local bl = gs and gs:FindFirstChild("Blizzard")
+    if bl and bl:IsA("BoolValue") and G.RM_BlizzardWas ~= nil
+        and bl.Value ~= G.RM_BlizzardWas then
+        bl.Value = G.RM_BlizzardWas
+    end
+    G.RM_BlizzardWas = nil
+end)
+Night1:CreateToggle({
+    Name = "Отключить метель (Blizzard)",
+    CurrentValue = false,
+    Callback = function(v)
+        local bl = nil
+        pcall(function()
+            local rs = game:FindFirstChild("ReplicatedStorage")
+            local gs = rs and rs:FindFirstChild("GameState")
+            local b = gs and gs:FindFirstChild("Blizzard")
+            if b and b:IsA("BoolValue") then bl = b end
+        end)
+        if not bl then
+            notify("Метель: GameState.Blizzard не найден", 3)
+            return
+        end
+        if v then
+            if G.RM_BlizzardWas == nil then
+                G.RM_BlizzardWas = bl.Value
+            end
+            bl.Value = false
+            notify("Метель: OFF (локально)", 2)
+        else
+            bl.Value = (G.RM_BlizzardWas ~= nil)
+                and G.RM_BlizzardWas or true
+            G.RM_BlizzardWas = nil
+            notify("Метель: как было", 2)
         end
     end,
 })
@@ -4004,6 +4204,44 @@ MemoriesTab:CreateToggle({
     end,
 })
 
+-- из gueston (GitHub, Mansion incident): на входной двери играет
+-- Growling, когда мутант у порога. Опрос 0.5с, кулдаун уведомлений 15с
+MemoriesTab:CreateSection("Тревога двери")
+G.RM_DoorAlert = false -- без флага: всегда стартует выключенным
+MemoriesTab:CreateToggle({
+    Name = "Мутант у входной двери (Growling)",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_DoorAlert = v
+        doorAlertGen = doorAlertGen + 1
+        local gen = doorAlertGen
+        if v then
+            notify("Тревога двери: ON", 3)
+            task.spawn(function()
+                local last = 0
+                while G.RM_DoorAlert and gen == doorAlertGen do
+                    if getgenv().RM_Run ~= RUN_ID then return end
+                    local playing = false
+                    pcall(function()
+                        local fd = workspace:FindFirstChild("FrontDoor")
+                        local sp = fd and fd:FindFirstChild("SoundPart")
+                        local g = sp and sp:FindFirstChild("Growling")
+                        playing = (g and g:IsA("Sound") and g.IsPlaying)
+                            or false
+                    end)
+                    if playing and os.clock() - last >= 15 then
+                        last = os.clock()
+                        notify("⚠ Мутант у ВХОДНОЙ двери!", 5)
+                    end
+                    task.wait(0.5)
+                end
+            end)
+        else
+            notify("Тревога двери: OFF", 2)
+        end
+    end,
+})
+
 MemoriesTab:CreateSection("Kid Detector")
 G.RM_KidDetect = false -- без флага: всегда стартует выключенным
 MemoriesTab:CreateToggle({
@@ -4250,6 +4488,9 @@ tpBtn("Сарай (Shack)", CFrame.new(-79, 4.5, -129), gateOldFactory)
 tpBtn("Щиток (FuseBox)", CFrame.new(-1, 4.5, -92.5), gateOldFactory)
 tpBtn("Вход с улицы", CFrame.new(-11.5, 4.6, -24.2), gateOldFactory)
 tpBtn("Второй этаж (доски)", CFrame.new(-40, 23, -68), gateOldFactory)
+-- из gueston (GitHub): «SafeZone» — точка в воздухе над картой
+-- (y=30). Безопасная высота: упадёшь обратно, если крыши нет
+tpBtn("Сейфзона (воздух)", CFrame.new(-14, 30, -122), gateOldFactory)
 
 TPTab:CreateSection("Ночь 3 — лагерь")
 tpBtnNames("Лодж", {"Lodge", "MainLodge"}, Vector3.new(0, 5, 10))
@@ -4769,6 +5010,88 @@ SettingsTab:CreateDropdown({
 })
 
 
+-- из prolover (Night 1): Plastic-материал, ноль отражений, декали/текстуры
+-- спрятаны, вода гладкая — кадры дешевеют. Состояние в атрибутах
+-- RM_Pot*: re-run-блок старта возвращает детали сам (п. 2c сверху)
+SettingsTab:CreateSection("Производительность")
+SettingsTab:CreateToggle({
+    Name = "Анти-лаг (Potato)",
+    CurrentValue = false,
+    Callback = function(v)
+        local n = 0
+        local ok, err = pcall(function()
+            if v then
+                for _, o in ipairs(workspace:GetDescendants()) do
+                    if o:IsA("BasePart") and not o:GetAttribute("RM_Pot") then
+                        o:SetAttribute("RM_Pot", 1)
+                        o:SetAttribute("RM_PotMat", o.Material.Name)
+                        o:SetAttribute("RM_PotRef", o.Reflectance)
+                        o.Material = Enum.Material.Plastic
+                        o.Reflectance = 0
+                        n = n + 1
+                    elseif (o:IsA("Decal") or o:IsA("Texture"))
+                        and not o:GetAttribute("RM_PotT") then
+                        o:SetAttribute("RM_PotT", 1)
+                        o:SetAttribute("RM_PotTrans", o.Transparency)
+                        o.Transparency = 1
+                        n = n + 1
+                    end
+                end
+                pcall(function()
+                    local t = workspace:FindFirstChildOfClass("Terrain")
+                    if t and not t:GetAttribute("RM_PotW") then
+                        t:SetAttribute("RM_PotW", 1)
+                        t:SetAttribute("RM_PotWr", t.WaterReflectance)
+                        t:SetAttribute("RM_PotWw", t.WaterWaveSize)
+                        t.WaterReflectance = 0
+                        t.WaterWaveSize = 0
+                        n = n + 1
+                    end
+                end)
+                notify("Анти-лаг: ON (" .. n .. " объектов; детали плоские)", 3)
+            else
+                for _, o in ipairs(workspace:GetDescendants()) do
+                    if o:GetAttribute("RM_Pot") then
+                        pcall(function()
+                            o.Material = Enum.Material[
+                                o:GetAttribute("RM_PotMat") or "Plastic"]
+                            o.Reflectance = o:GetAttribute("RM_PotRef") or 0
+                        end)
+                        o:ClearAttribute("RM_Pot")
+                        o:ClearAttribute("RM_PotMat")
+                        o:ClearAttribute("RM_PotRef")
+                        n = n + 1
+                    elseif o:GetAttribute("RM_PotT") then
+                        pcall(function()
+                            o.Transparency =
+                                o:GetAttribute("RM_PotTrans") or 0
+                        end)
+                        o:ClearAttribute("RM_PotT")
+                        o:ClearAttribute("RM_PotTrans")
+                        n = n + 1
+                    end
+                end
+                pcall(function()
+                    local t = workspace:FindFirstChildOfClass("Terrain")
+                    if t and t:GetAttribute("RM_PotW") then
+                        t.WaterReflectance = t:GetAttribute("RM_PotWr") or 1
+                        t.WaterWaveSize = t:GetAttribute("RM_PotWw") or 0.05
+                        t:ClearAttribute("RM_PotW")
+                        t:ClearAttribute("RM_PotWr")
+                        t:ClearAttribute("RM_PotWw")
+                        n = n + 1
+                    end
+                end)
+                notify("Анти-лаг: OFF (восстановлено " .. n .. ")", 3)
+            end
+        end)
+        if not ok then
+            print("[RM] анти-лаг: " .. tostring(err))
+            notify("Анти-лаг: ошибка — смотри консоль", 3)
+        end
+    end,
+})
+
 mkPicker(SettingsTab, {
     Name = "Акцент",
     Color = getgenv().RM_Theme.TabBackgroundSelected,
@@ -4861,4 +5184,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.29 rayfield loaded | v4.29: убрана проверка на Residence Massacre (GameId/PlaceIds) — меню и скрипт открываются в ЛЮБОЙ игре (игровые фичи молчат, ТП-гейты от улета в пустоту защищают) | ФИКСЫ v4.28 (баг-хант 20 зон, 233 находки, отчёт BUGHUNT_v4.26.md): Под землю — кэш коллизий публикуется в getgenv (re-run возвращает коллизии + поднимает на поверхность), ручной OFF поднимает с глубины, Noclip↔Под-землю читают чужие кэши | автоэлектрика — состояние ящика = намерение клика, а не слепой toggle (flip-flop «шаг 2/шаг 3» убран), пересадка ящика одним рейсом | Паника-ТП — кулдаун 4с, труп не телепортируется, окно паники 15с (автофичи не стартуют, возвраты не откатывают из укрытия, мьютекс на время полёта), ТП-кнопки с force | smoothTP — новый твин отменяет предыдущий (два твина больше не дрались за CFrame) + таймаут ожидания (уничтоженный HRP больше не вешает поток) | «Заправить сейчас» через лимитер (анти-Error 267) | серия дюпа — лимитер на КАЖДОМ шаге, Revive блок при серии | hold-бинд аимбота — guard от зомби-цикла после re-run | Repair/Delivery — общий кулдаун на ремоут (8 кнопок не рвут соединение) | v4.27: сентинел пустого бинда Unknown → ButtonX — Roblox отдаёт input.KeyCode = Enum.KeyCode.Unknown на клики мыши/колесо/тап (DevForum 4073073; фильтр RF 3277) → v4.26 запускал ВСЕ 10 биндов на каждый клик; свип витрины только по TextBox «KeybindBox», санити старого конфига — 3 прохода (4.6/5.6/7.6с) против гонки с LoadConfiguration | v4.26: бинды «None» (под капотом тогда был Unknown — ошибки ввода убраны), автосанити + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.30 rayfield loaded | v4.30: порт полезного из чужих скриптов (скан 14 репозиториев): «Запустить цели (радио)» — ТП к радио + клики до GameState.Active с возвратом на место (prolover), «Отключить метель» — GameState.Blizzard локально с откатом при re-run (prolover), «Бесплатные апгрейды (эксп.)» — RS.Upgrades.Generator Max/Price + показ UpgradeShop/Gambler, честный notify что сервер может не доверять клиенту (diddy), «Тревога двери» — опрос Growling на FrontDoor.SoundPart, кулдаун уведомлений 15с (gueston), «Анти-лаг (Potato)» — Plastic + ноль отражений + декали/текстуры + вода, кэш исходных значений в атрибутах RM_Pot*, восстановление при re-run и на OFF (prolover), WorkerHead (Ночь 3) в Item ESP — предмет без ClickDetector, гейт автозабора e.prompt or e.cd его не трогает (gueston), ТП «Сейфзона (воздух)» y=30 (gueston) | v4.29: убрана проверка на Residence Massacre (GameId/PlaceIds) — меню и скрипт открываются в ЛЮБОЙ игре (игровые фичи молчат, ТП-гейты от улета в пустоту защищают) | ФИКСЫ v4.28 (баг-хант 20 зон, 233 находки, отчёт BUGHUNT_v4.26.md): Под землю — кэш коллизий публикуется в getgenv (re-run возвращает коллизии + поднимает на поверхность), ручной OFF поднимает с глубины, Noclip↔Под-землю читают чужие кэши | автоэлектрика — состояние ящика = намерение клика, а не слепой toggle (flip-flop «шаг 2/шаг 3» убран), пересадка ящика одним рейсом | Паника-ТП — кулдаун 4с, труп не телепортируется, окно паники 15с (автофичи не стартуют, возвраты не откатывают из укрытия, мьютекс на время полёта), ТП-кнопки с force | smoothTP — новый твин отменяет предыдущий (два твина больше не дрались за CFrame) + таймаут ожидания (уничтоженный HRP больше не вешает поток) | «Заправить сейчас» через лимитер (анти-Error 267) | серия дюпа — лимитер на КАЖДОМ шаге, Revive блок при серии | hold-бинд аимбота — guard от зомби-цикла после re-run | Repair/Delivery — общий кулдаун на ремоут (8 кнопок не рвут соединение) | v4.27: сентинел пустого бинда Unknown → ButtonX — Roblox отдаёт input.KeyCode = Enum.KeyCode.Unknown на клики мыши/колесо/тап (DevForum 4073073; фильтр RF 3277) → v4.26 запускал ВСЕ 10 биндов на каждый клик; свип витрины только по TextBox «KeybindBox», санити старого конфига — 3 прохода (4.6/5.6/7.6с) против гонки с LoadConfiguration | v4.26: бинды «None» (под капотом тогда был Unknown — ошибки ввода убраны), автосанити + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
