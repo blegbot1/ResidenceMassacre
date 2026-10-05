@@ -90,6 +90,33 @@ pcall(function()
     end
 end)
 
+-- ================= Anti-Kick (всегда при старте) =================
+-- Разрушаем локальную копию Remotes.Kick — клиентский обработчик кика
+-- (LocalScript, слушающий этот RemoteEvent, либо WaitForChild("Kick"))
+-- перестаёт работать. Серверный Kick с клиента не блокируется — это
+-- честное ограничение такого Anti-Kick. ВНИМАНИЕ: отменяет старое
+-- правило «Kick не трогать» — по явной просьбе.
+local function antiKick()
+    pcall(function()
+        local rs = game:GetService("ReplicatedStorage")
+        local remotes = rs:WaitForChild("Remotes", 10)
+        local kick = remotes and remotes:FindFirstChild("Kick")
+        if kick then kick:Destroy() end
+    end)
+end
+task.spawn(antiKick) -- не блокируем старт скрипта, если Remotes грузится дольше
+-- страховка: если игра пересоздаст ремоут (respawn/смена места)
+local kickConn
+kickConn = LP.CharacterAdded:Connect(function()
+    if getgenv().RM_Run ~= RUN_ID then
+        if kickConn then kickConn:Disconnect() kickConn = nil end
+        return
+    end
+    task.wait(2)
+    if getgenv().RM_Run ~= RUN_ID then return end
+    antiKick()
+end)
+
 if G.RM_FB == nil then G.RM_FB = true end                -- fullbright (+ всегда без тумана)
 G.RM_Bright = G.RM_Bright or 3                        -- яркость 0..10
 G.RM_TPSpeed = false                                  -- TP walk (ВЫКЛ по умолчанию)
@@ -620,6 +647,27 @@ end)
 -- RMxploitt); старый вариант ждал .Value числом и молча ничего не делал.
 -- Значения Temperature/Freeze тоже держим, но ТОЛЬКО при отличии —
 -- постоянные записи дают десинк и кик (Error 267).
+-- re-run: прошлый прогон мог погасить Character.Temperature (LocalScript)
+-- и уйти не выключив — возвращаем; персонаж может ещё грузиться,
+-- поэтому с короткими повторами (только пока RUN_ID жив)
+task.spawn(function()
+    for _ = 1, 20 do
+        if getgenv().RM_Run ~= RUN_ID then return end
+        if not G.RM_TempScriptOff then return end
+        local done = false
+        pcall(function()
+            local t = LP.Character
+                and LP.Character:FindFirstChild("Temperature", true)
+            if t and (t:IsA("LocalScript") or t:IsA("Script")) then
+                t.Enabled = true
+                G.RM_TempScriptOff = nil
+                done = true
+            end
+        end)
+        if done then return end
+        task.wait(0.5)
+    end
+end)
 G.RM_AntiFreeze = false -- без флага: всегда стартует выключенным
 local tempScriptOff = false -- выключили ли мы LocalScript (чтобы вернуть)
 task.spawn(function()
@@ -634,6 +682,7 @@ task.spawn(function()
                         if t.Enabled then
                             t.Enabled = false
                             tempScriptOff = true
+                            G.RM_TempScriptOff = true -- переживает re-run
                         end
                     elseif t and t:IsA("ValueBase")
                         and typeof(t.Value) == "number"
@@ -2565,7 +2614,7 @@ freezeToggle = PlayerTab:CreateToggle({
     CurrentValue = false,
     Callback = function(v)
         G.RM_AntiFreeze = v
-        if not v and tempScriptOff then
+        if not v and (tempScriptOff or G.RM_TempScriptOff) then
             -- вернуть LocalScript Temperature, который мы погасили
             pcall(function()
                 local ch = LP.Character
@@ -2575,6 +2624,7 @@ freezeToggle = PlayerTab:CreateToggle({
                 end
             end)
             tempScriptOff = false
+            G.RM_TempScriptOff = nil
         end
         notify("Anti-Freeze: " .. (v and "ON" or "OFF"), 2)
     end,
@@ -2597,6 +2647,8 @@ noclipToggle = PlayerTab:CreateToggle({
         G.RM_Noclip = v
         if v then
             if noclipConn then noclipConn:Disconnect() noclipConn = nil end
+            local parts, partsAt = {}, 0 -- кеш частей: GetDescendants раз
+            -- в 0.5с, а не 60 раз/с (и noclipSaved не копит мёртвые части)
             noclipConn = RunService.Stepped:Connect(function()
                 if getgenv().RM_Run ~= RUN_ID then
                     -- re-run: коннект отписывается сам, иначе живёт вечно
@@ -2606,8 +2658,17 @@ noclipToggle = PlayerTab:CreateToggle({
                 pcall(function()
                     local ch = LP.Character
                     if ch then
-                        for _, p in ipairs(ch:GetDescendants()) do
-                            if p:IsA("BasePart") then
+                        if os.clock() - partsAt > 0.5 then
+                            partsAt = os.clock()
+                            table.clear(parts)
+                            for _, d in ipairs(ch:GetDescendants()) do
+                                if d:IsA("BasePart") then
+                                    parts[#parts + 1] = d
+                                end
+                            end
+                        end
+                        for _, p in ipairs(parts) do
+                            if p.Parent and p:IsA("BasePart") then
                                 -- помним исходное значение: при выключении
                                 -- вернём СВОИ коллизии, а не все подряд
                                 if noclipSaved[p] == nil then
@@ -2641,6 +2702,69 @@ PlayerTab:CreateKeybind({
         noclipToggle:Set(not G.RM_Noclip)
     end,
 })
+
+-- ================= бессмертие (God Mode) =================
+-- Клиентский долив HP (HealthChanged) + запрет клиентского состояния
+-- Dead. Если сервер сам перезаписывает Humanoid.Health — остановить его
+-- с клиента нельзя, но реактивный долив успевает между ударами.
+local godConn, godWatch
+local function godHook()
+    if getgenv().RM_Run ~= RUN_ID or not G.RM_God then return end
+    local ch = LP.Character
+    local hm = ch and ch:FindFirstChildOfClass("Humanoid")
+    if not hm or not hm.Parent then return end
+    if godConn then godConn:Disconnect() godConn = nil end
+    godConn = hm.HealthChanged:Connect(function(h)
+        if getgenv().RM_Run ~= RUN_ID or not G.RM_God then
+            if godConn then godConn:Disconnect() godConn = nil end
+            return
+        end
+        pcall(function()
+            if h < hm.MaxHealth then hm.Health = hm.MaxHealth end
+        end)
+    end)
+    pcall(function()
+        hm:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+        if hm.Health < hm.MaxHealth then hm.Health = hm.MaxHealth end
+    end)
+end
+local function setGod(on, silent)
+    G.RM_God = on
+    if godConn then godConn:Disconnect() godConn = nil end
+    if godWatch then godWatch:Disconnect() godWatch = nil end
+    if not on then
+        -- возвращаем клиенту возможность умереть (как было)
+        pcall(function()
+            local ch = LP.Character
+            local hm = ch and ch:FindFirstChildOfClass("Humanoid")
+            if hm then
+                hm:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
+            end
+        end)
+        if not silent then notify("Бессмертие: OFF", 2) end
+        return
+    end
+    godHook()
+    -- новый спавн/перезаход — подписываемся заново
+    godWatch = LP.CharacterAdded:Connect(function()
+        if getgenv().RM_Run ~= RUN_ID or not G.RM_God then
+            if godWatch then godWatch:Disconnect() godWatch = nil end
+            return
+        end
+        task.wait(1)
+        if getgenv().RM_Run ~= RUN_ID or not G.RM_God then return end
+        godHook()
+    end)
+    if not silent then notify("Бессмертие: ON", 2) end
+end
+PlayerTab:CreateToggle({
+    Name = "Бессмертие (God Mode)",
+    CurrentValue = G.RM_God == true,
+    Callback = function(v) setGod(v) end,
+})
+-- re-run: тогл пересоздаётся «выкл», а G.RM_God мог пережить перезапуск —
+-- перевешиваем подписки молча (без второго уведомления)
+if G.RM_God == true then setGod(true, true) end
 
 PlayerTab:CreateSection("Прочее")
 PlayerTab:CreateButton({
@@ -2678,7 +2802,9 @@ local function staticScan()
                             or string.find(n, "noise", 1, true)
                             or string.find(n, "vhs", 1, true)
                             or string.find(n, "glitch", 1, true))
-                            and string.sub(n, 1, 3) ~= "rm_" then -- свои не трогаем
+                            and string.sub(n, 1, 3) ~= "rm_" -- свои не трогаем
+                            and not (eliteGui and g:IsDescendantOf(eliteGui))
+                            then -- и собственное окно не гасим (иначе тогл не выключить)
                             g:SetAttribute("RM_NoStatic", true)
                             g.Enabled = false
                         end
@@ -3153,6 +3279,7 @@ Night3:CreateToggle({
                 if not rem and remotes then
                     rem = remotes:WaitForChild("OpenDoor", 10)
                 end
+                if getgenv().RM_Run ~= RUN_ID then return end -- re-run во время ожидания
                 -- могли выключить/переключить тогл, пока ждали ремоут
                 if not (G.RM_CabinAlert and gen == cabinGen) then return end
                 if rem and rem:IsA("RemoteEvent") then
@@ -3200,7 +3327,7 @@ task.spawn(function()
     while true do
         if getgenv().RM_Run ~= RUN_ID then return end
         if G.RM_KidDetect then
-            pcall(function()
+            local okK, errK = pcall(function()
                 local lpch = LP.Character
                 local myHRP = lpch and lpch:FindFirstChild("HumanoidRootPart")
                 local now = {}
@@ -3237,6 +3364,11 @@ task.spawn(function()
                 end
                 known = now
             end)
+            if not okK then
+                -- молчаливый pcall прятал бы ошибки скана: тогл ON,
+                -- а детект молчит — пишем причину в консоль
+                print("[RM] Kid Detector: ошибка скана: " .. tostring(errK))
+            end
         else
             known = {}
         end
@@ -3646,9 +3778,11 @@ local function panicTP()
     end
     if list and #list > 0 then
         local pick = list[math.random(#list)]
-        pcall(function() smoothTP(hrp, pick[2]) end)
+        local okTp = false
+        pcall(function() okTp = smoothTP(hrp, pick[2]) end)
         if getgenv().RM_Run ~= RUN_ID then return end
-        notify("Паника → " .. pick[1], 3)
+        -- smoothTP возвращает false при re-run/ошибке твина — не врём «Паника →»
+        notify(okTp and ("Паника → " .. pick[1]) or "Паника: ТП не удался", 3)
         return
     end
     -- своих координат под эту карту нет — ищем укрытие по имени
@@ -3667,11 +3801,13 @@ local function panicTP()
                 end
             end)
             if pos then
+                local okN = false
                 pcall(function()
-                    smoothTP(hrp, CFrame.new(pos + Vector3.new(0, 5, 3)))
+                    okN = smoothTP(hrp, CFrame.new(pos + Vector3.new(0, 5, 3)))
                 end)
                 if getgenv().RM_Run ~= RUN_ID then return end
-                notify("Паника → " .. name, 3)
+                notify(okN and ("Паника → " .. name)
+                    or "Паника: ТП не удался", 3)
                 return
             end
         end
@@ -3876,6 +4012,7 @@ SettingsTab:CreateDropdown({
     Flag = "RM_CamView",
     Callback = function(opt)
         local v = (typeof(opt) == "table") and opt[1] or opt
+        if typeof(v) ~= "string" then v = "Как в игре" end -- пустой CurrentOption
         if v == "1-е лицо" then
             G.RM_CamMode = "first"
         elseif v == "3-е (сзади)" then
@@ -3905,7 +4042,13 @@ mkPicker(SettingsTab, {
             NotificationActionsBackground = c:Lerp(Color3.new(1, 1, 1), 0.35),
             DropdownSelected = c:Lerp(Color3.new(0, 0, 0), 0.5),
         })
-        recolorGradient(c)
+        -- ColorPicker шлёт колбэк на каждый шаг мыши: GetDescendants в
+        -- recolorGradient дебаунсим тем же токеном, что и тему (0.2с)
+        local accMine = themeToken
+        task.delay(0.2, function()
+            if getgenv().RM_Run ~= RUN_ID or accMine ~= themeToken then return end
+            recolorGradient(c)
+        end)
     end),
 })
 
@@ -3975,4 +4118,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.20 rayfield loaded | РЕВИЗИЯ: при re-run гасится старая библиотека Rayfield (старые бинды больше не дёргают новые тоглы), noclip возвращает коллизии и самоотписывается, scare/cabin-коннекты самоотписываются, guard'ы в «дровах»/вентиляции/панике + откат RM_TP_Origin, стартовый сброс RM_NoStatic | ГЕЙТЫ ТП: сырые точки другой карты (плейс+высота) больше не кидают в пустоту | КУЛДАУН 2с на кнопки FireServer (анти-двойной клик) | КОНФИГ: уведомления только при реальном изменении, цвета пикеров докручиваются на +5с, ColorPicker создаётся безопасно (нет метода — пропуск, а не смерть скрипта) | v4.19: Паника-ТП (G), Kid Detector, Disable Static, бункер-ТП | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.21 rayfield loaded | НОВОЕ: Anti-Kick всегда при старте (Destroy Remotes.Kick — клиентская сторона кика) + повтор на спавне, Бессмертие/God Mode (тогл в «Игрок»: HP-долив по HealthChanged + запрет состояния Dead, перевешивается при re-run) | РЕВИЗИЯ (ревью 2400-3783): RUN_ID после WaitForChild в Тревоге кабины, Anti-Freeze возвращает погашенный Temperature-скрипт после re-run (RM_TempScriptOff), noclip кеширует части раз в 0.5с (был GetDescendants каждый кадр), Disable Static не гасит собственное окно Rayfield, Kid Detector пишет ошибки скана в консоль, Паника честно пишет «ТП не удался» (ok от smoothTP), Камера без table: 0x... в notify, recolorGradient в дебаунсе темы | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
