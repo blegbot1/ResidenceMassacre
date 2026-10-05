@@ -91,7 +91,7 @@
 | GitHubTestei/ResidenceMassacre (Rayfield, читаемый) → **частично v4.19** | добавлена точка «Второй этаж (доски)» `(-40,23,-68)`; остальные 3 CF `(-80,4,-134)/(-5,4,-98)` — дубли наших Shack/Power; названия кнопок (TP O2/power box/radio) без координат — пропущены |
 | frank590-star (Night 1, читаемый) → **перенесено v4.19** | `Shack=(-79,4.5,-129)`, `FuseBox=(-1,4.5,-92.5)` — кнопки ТП; `Entrance≈наша (дубль)`; `workspace.Mutant.Spy/Asphyxia/HotChocolate` — не проверено, не трогал |
 | TheGuestON / Pixeluted (GitHub) | ТП-точки (`FrontDoor/SoundPart/Growling`, ген `-79.725,4.675,-132.755`); Pixeluted старый (2023), содержит обходы (adonis/hookmetamethod) — только структуры |
-| ScriptBlox-снippets выдачи → **частично v4.19** | 55878: **kid detector** — СДЕЛАН (тогл в Ночь 3); 241706 auto-wire/Larry notifier — наш auto electric покрывает, notifier не делал; 61029 esp abomination — покрыто расширением Mutant ESP |
+| ScriptBlox-снippets выдачи → **частично v4.19** | 55878: **kid detector** — СДЕЛАН (тогл «Детект ребёнка (GhostChild)», с v4.22 во вкладке **Воспоминания**, переехал из «Ночи 3»); 241706 auto-wire/Larry notifier — наш auto electric покрывает, notifier не делал; 61029 esp abomination — покрыто расширением Mutant ESP |
 | GitHub-скан (2026-10, новый проход) | новых работающих raw/gist/pastefy с кодом СВЕРХ известных не найдено; обф подтверждён: ApexScript0x/RM (MoonVeil 242КБ), manfac9000 (таблица `\068\066…`), flopa2677 (MoonSec); TheGuestON-лоадер → pastebin `PTg2vat8` = 404 |
 
 ## Известные несделанное (осознанно)

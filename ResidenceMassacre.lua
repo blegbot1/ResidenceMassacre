@@ -87,6 +87,42 @@ pcall(function()
     end
 end)
 G.RM_NoclipSaved = nil
+-- 2b) Под-землю переживала re-run ещё хуже: кеш исходных коллизий
+-- (st.noclipWas) жил в замыкании СТАРОГО прогона и был недостижим —
+-- поднимать было нечем (п.1/215). Публикуем кеш в getgenv при
+-- погружении; здесь поднимаем персонажа И возвращаем коллизии ОДНО-
+-- ВРЕМЕННО (иначе можно застрять в грунте с включёнными коллизиями).
+-- Подъём идёт лучом вверх от текущей точки — тот же столб земли,
+-- которым персонаж и спускался; если персонажа ещё нет — кеш остаётся
+-- в G, дочистит блок восстановления ниже (3173)
+pcall(function()
+    local saved = G.RM_UnderWas
+    if type(saved) == "table" then
+        local ch = LP.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local ok, gy = pcall(function()
+                local rp = RaycastParams.new()
+                rp.FilterType = Enum.RaycastFilterType.Exclude
+                rp.FilterDescendantsInstances = {ch}
+                local hit = workspace:Raycast(hrp.Position,
+                    Vector3.new(0, 400, 0), rp)
+                return hit and hit.Position.Y
+            end)
+            if ok and type(gy) == "number"
+                and gy > hrp.Position.Y + 15 then
+                hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                hrp.CFrame = CFrame.new(hrp.Position.X,
+                    gy + 3, hrp.Position.Z)
+                    * (hrp.CFrame - hrp.CFrame.Position)
+            end
+            for part, was in pairs(saved) do
+                if part and part.Parent then part.CanCollide = was end
+            end
+            G.RM_UnderWas = nil
+        end
+    end
+end)
 -- 3) Disable Static: новый запуск всегда со стартовым OFF
 G.RM_NoStatic = false
 pcall(function()
@@ -170,11 +206,22 @@ end
 -- TP walk не тут: он и так двигает каждый кадр маленькими шажками.
 local TweenService = game:GetService("TweenService")
 
+-- п.192: окно паники-ТП — пока активно, автофичи не стартуют (игрока
+-- только что спасли в укрытие — лететь за предметом = вытащить его
+-- обратно), а автоматические телепорты (в т.ч. возвратные из автодействий)
+-- не двигают персонажа. Паника и явные ТП-кнопки идут с force = true
+local function panicIdle()
+    return os.clock() >= (G.RM_PanicUntil or 0)
+end
+
 -- Возвращает true, только если долетели И скрипт не перезапускали:
--- после Completed:Wait() старый прогон при re-run обязан прекратить
+-- после ожидания старый прогон при re-run обязан прекратить
 -- свои действия — иначе два прогона тянут персонаж в разные точки.
-local function smoothTP(hrp, cf, dur)
+local function smoothTP(hrp, cf, dur, force)
     if getgenv().RM_Run ~= RUN_ID then return false end
+    -- п.192: окно паники блокирует не-force телепорты — игрок остаётся
+    -- в укрытии (возвраты автозабора/заправки/камена не откатывают его)
+    if not force and not panicIdle() then return false end
     if not dur then
         local spd = tonumber(G.RM_TweenSpeed) or 500
         dur = math.clamp(
@@ -182,12 +229,27 @@ local function smoothTP(hrp, cf, dur)
     end
     local okDone = false
     pcall(function()
+        -- п.220+192: новый твин отменяет предыдущий (ссылка общая в G):
+        -- два твина на одном HRP дрались за CFrame (re-run, паника vs
+        -- автозабор) — победитель был случаен
+        local prev = G.RM_Tween
+        if typeof(prev) == "Tween" then
+            pcall(function() prev:Cancel() end)
+        end
         local tw = TweenService:Create(hrp,
             TweenInfo.new(dur, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
             { CFrame = cf })
+        G.RM_Tween = tw
         tw:Play()
-        tw.Completed:Wait()
-        okDone = true
+        -- п.82/193: Completed:Wait() БЕЗ таймаута: при уничтоженном HRP
+        -- событие может не прийти — поток бинда/цикла вис бы навсегда.
+        -- Ждём не дольше длительности + запас (Cancel разбудит раньше)
+        local t0 = os.clock()
+        while tw.PlaybackState == Enum.PlaybackState.Playing
+            and os.clock() - t0 < dur + 1 do
+            task.wait(0.05)
+        end
+        okDone = tw.PlaybackState == Enum.PlaybackState.Completed
     end)
     if getgenv().RM_Run ~= RUN_ID then return false end
     if not hrp or not hrp.Parent then return false end
@@ -1466,7 +1528,7 @@ task.spawn(function()
     while true do
         if getgenv().RM_Run ~= RUN_ID then return end
         local okP, errP = pcall(function()
-            if G.RM_AutoPickup and not pickupBusy then
+            if G.RM_AutoPickup and not pickupBusy and panicIdle() then
                 local ch = LP.Character
                 local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
                 if hrp then
@@ -1606,7 +1668,7 @@ task.spawn(function()
     while true do
         if getgenv().RM_Run ~= RUN_ID then return end
         local okF, errF = pcall(function()
-            if G.RM_AutoFuel and not pickupBusy then
+            if G.RM_AutoFuel and not pickupBusy and panicIdle() then
                 local ch = LP.Character
                 local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
                 if hrp then
@@ -1820,7 +1882,7 @@ task.spawn(function()
     while true do
         if getgenv().RM_Run ~= RUN_ID then return end
         local okC, errC = pcall(function()
-            if G.RM_AutoCell and not pickupBusy then
+            if G.RM_AutoCell and not pickupBusy and panicIdle() then
                 local ch = LP.Character
                 local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
                 if hrp then
@@ -1910,7 +1972,7 @@ end)
 -- Если провод не берётся дважды — щёлкаем ящик ещё раз (вдруг закрыт).
 -- Все полёты плавные (TweenService), пока Auto electric включён.
 G.RM_AutoElectric = false -- без флага: всегда стартует выключенным
-local fuseOpened = false   -- мы открыли ящик (нажатие = toggle)
+local fuseOpened = false   -- намеренное состояние ящика (см. elecClickBox)
 local wireFixAt = {}       -- [модель провода] = когда чинили (кулдаун 4с)
 local wireTries = {}       -- [модель провода] = попыток; 2 → щёлкаем ящик
 local wrenchGetAt = -1e9  -- кулдаун добычи ключа (0 врёт при маленьком os.clock)
@@ -2014,7 +2076,13 @@ local function elecTP(hrp, worldPos, height)
     if getgenv().RM_Run ~= RUN_ID then return end
 end
 
-local function elecClickBox(hrp, origin)
+-- п.89: toggle засчитывался по успеху КЛИЕНТСКОГО вызова (pcall лишь
+-- значит «не упало») — сервер мог не изменить состояние, флаг расходился
+-- с ящиком и питал вечный flip-flop (п.88). Теперь состояние = НАМЕРЕНИЕ:
+-- mode "open" (дефолт) — один клик с намерением открыть; "reseat" —
+-- щёлкнуть дважды (закрыть→открыть) одним рейсом, вернув намеренное
+-- открытое состояние — шаг «2) открываем» перестаёт драться с шагом «3)»
+local function elecClickBox(hrp, origin, mode)
     local box, bcd = elecFind("fusebox", true)
     if not bcd then return false end
     pickupBusy = true
@@ -2023,9 +2091,17 @@ local function elecClickBox(hrp, origin)
         if pos then elecTP(hrp, pos, 2) end
         -- re-run во время полёта: старый прогон не щёлкает ящиком
         if getgenv().RM_Run ~= RUN_ID then return end
-        -- toggle засчитываем только при реальном клике
         if pcall(function() fireclickdetector(bcd) end) then
-            fuseOpened = not fuseOpened
+            if mode == "reseat" then
+                fuseOpened = false -- намеренно закрыли
+                task.wait(0.3)
+                if getgenv().RM_Run ~= RUN_ID then return end
+                if pcall(function() fireclickdetector(bcd) end) then
+                    fuseOpened = true -- намеренно открыли
+                end
+            else
+                fuseOpened = true -- намеренное «открыть»
+            end
         end
         task.wait(0.3)
     end)
@@ -2042,7 +2118,7 @@ task.spawn(function()
     while true do
         if getgenv().RM_Run ~= RUN_ID then return end
         local okE, errE = pcall(function()
-            if G.RM_AutoElectric and not pickupBusy then
+            if G.RM_AutoElectric and not pickupBusy and panicIdle() then
                 local ch = LP.Character
                 local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
                 if hrp and typeof(fireclickdetector) == "function" then
@@ -2151,10 +2227,13 @@ task.spawn(function()
                         if w and (not wireFixAt[w.model]
                             or (now - wireFixAt[w.model]) > 4) then
                             if (wireTries[w.model] or 0) >= 2 then
-                                -- дважды не берётся — возможно, ящик закрыт:
-                                -- щёлкаем его и пробуем провод снова
+                                -- дважды не берётся — возможно, ящик закрыт
+                                -- или завис: пересаживаем его ОДНИМ рейсом
+                                -- (закрыть→открыть) и пробуем провод снова;
+                                -- флаг остаётся «открыт» — без flip-flop
+                                -- между шагами «2) открываем» и «3)» (п.88)
                                 wireTries[w.model] = 0
-                                elecClickBox(hrp, hrp.CFrame)
+                                elecClickBox(hrp, hrp.CFrame, "reseat")
                             else
                                 pickupBusy = true
                                 local origin = hrp.CFrame
@@ -2330,6 +2409,20 @@ for _, u in ipairs(rayUrls) do
     local ok, res = pcall(function()
         return loadstring(game:HttpGet(u, true))()
     end)
+    -- п.212: HttpGet — yield (1–5с). Пока старый прогон сидел в
+    -- загрузке, мог пройти re-run: новый прогон уже сбросил
+    -- G.RM_RayfieldLib и нарисует своё окно — старому нельзя ни
+    -- дописывать G (2400), ни рисовать ВТОРОЕ окно (два меню) и
+    -- затирать ссылку живой библиотеки мёртвой
+    if getgenv().RM_Run ~= RUN_ID then
+        pcall(function()
+            if type(res) == "table"
+                and type(res.Destroy) == "function" then
+                res:Destroy()
+            end
+        end)
+        return
+    end
     if ok and type(res) == "table" and res.CreateWindow then
         Rayfield = res
         break
@@ -2872,7 +2965,17 @@ noclipToggle = PlayerTab:CreateToggle({
                                 -- помним исходное значение: при выключении
                                 -- вернём СВОИ коллизии, а не все подряд
                                 if noclipSaved[p] == nil then
-                                    noclipSaved[p] = p.CanCollide
+                                    -- п.141: под-землю уже выключила
+                                    -- коллизию — оригинал лежит в её
+                                    -- кеше (G.RM_UnderWas), берём его,
+                                    -- а не текущее false
+                                    local uw = G.RM_UnderWas
+                                    if type(uw) == "table"
+                                        and uw[p] ~= nil then
+                                        noclipSaved[p] = uw[p]
+                                    else
+                                        noclipSaved[p] = p.CanCollide
+                                    end
                                 end
                                 if p.CanCollide then p.CanCollide = false end
                             end
@@ -2982,6 +3085,7 @@ local function underFinish()
         local cam = workspace.CurrentCamera
         if st.prevCam then cam.CameraType = st.prevCam end
     end)
+    G.RM_UnderWas = nil -- коллизии возвращены — кеш больше не нужен
     print("[RM] Под землю: всплытие")
 end
 
@@ -3010,6 +3114,10 @@ local function underStart(hrp, cam)
     end)
     under = st
     G.RM_UnderActive = true
+    -- п.1/215+141: кеш исходных коллизий публикуем в getgenv сразу —
+    -- при re-run стартовый блок (2b) вернёт его, а Noclip при включении
+    -- возьмёт оригинал из него, а не своё текущее false
+    G.RM_UnderWas = st.noclipWas
     print("[RM] Под землю: погружение, глубина " .. UNDER_DEPTH .. " ст")
 end
 
@@ -3099,7 +3207,17 @@ local function underFrame()
         for _, pp in ipairs(st.parts) do
             if pp.Parent and pp:IsA("BasePart") then
                 if st.noclipWas[pp] == nil then
-                    st.noclipWas[pp] = pp.CanCollide
+                    -- п.141: Noclip уже выключил коллизию — оригинал
+                    -- живёт в его кеше (G.RM_NoclipSaved), берём его,
+                    -- а не текущее false (иначе после включения/выключения
+                    -- Noclip посреди погружения коллизии отняты навсегда)
+                    local ns = G.RM_NoclipSaved
+                    if G.RM_Noclip and type(ns) == "table"
+                        and ns[pp] ~= nil then
+                        st.noclipWas[pp] = ns[pp]
+                    else
+                        st.noclipWas[pp] = pp.CanCollide
+                    end
                 end
                 if pp.CanCollide then pp.CanCollide = false end
             end
@@ -3163,6 +3281,22 @@ local function setUnder(on, silent)
     else
         pcall(function() RunService:UnbindFromRenderStep("RMUnderground") end)
         underInput(false)
+        -- п.140: ручной OFF посреди погружения — поднимаем персонажа
+        -- на поверхность ДО underFinish: без пина гравитация тянет его
+        -- вниз, и он залипает в грунте (или падает в пустоту)
+        pcall(function()
+            local st = under
+            if st then
+                local ch = LP.Character
+                local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+                if hrp and st.curY < st.groundY + st.standOff - 1 then
+                    hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    hrp.CFrame = CFrame.new(hrp.Position.X,
+                        st.groundY + st.standOff, hrp.Position.Z)
+                        * (hrp.CFrame - hrp.CFrame.Position)
+                end
+            end
+        end)
         underFinish()
         if not silent then notify("Под землю: OFF", 2) end
     end
@@ -3187,6 +3321,17 @@ if G.RM_UnderActive then
                 hrp.CFrame = CFrame.new(
                     hrp.Position.X, gy + 3, hrp.Position.Z)
             end
+        end
+    end)
+    -- п.215: если на старте персонажа ещё не было (блок 2b не смог
+    -- восстановить) — возвращаем коллизии из опубликованного кеша здесь
+    pcall(function()
+        local saved = G.RM_UnderWas
+        if type(saved) == "table" then
+            for part, was in pairs(saved) do
+                if part and part.Parent then part.CanCollide = was end
+            end
+            G.RM_UnderWas = nil
         end
     end)
 end
@@ -3422,9 +3567,37 @@ Night1:CreateSlider({
     end,
 })
 
+-- общий кулдаун на «горячие» кнопки с FireServer: двойной клик или
+-- зажатие не должны слать серию одинаковых вызовов — тот же риск
+-- Error 267, что мы уже лечили у автозаправки. Перенесён сюда выше
+-- первых кнопок: лексический скоуп требует объявления ДО первого
+-- Callback. П.157: Repair/Delivery делят ключ НА РЕМОУТ, не на аргумент:
+-- сервер кулдаунит remote, а не его параметры — 8 кнопок подряд
+-- рвали соединение (Error 267).
+local fireAt = {}
+local function fireThrottle(key)
+    local now = os.clock()
+    if fireAt[key] and now - fireAt[key] < 2 then
+        notify("Подожди пару секунд между нажатиями (кулдаун 2с)", 1)
+        return false
+    end
+    fireAt[key] = now
+    return true
+end
+
 Night1:CreateButton({
     Name = "Заправить сейчас (вручную)",
     Callback = function()
+        -- п.136: кнопка шла мимо всех лимитеров — серия быстрых кликов =
+        -- шквал FireServer (Error 267) и ложный «успех». Держим общий
+        -- кулдаун авто-заправки и штампуем его, чтобы автофича не
+        -- стартовала сразу после ручной
+        if os.clock() - lastFuelAt < 3 then
+            notify("Заправка: подожди пару секунд", 2)
+            return
+        end
+        if not fireThrottle("FuelManual") then return end
+        lastFuelAt = os.clock()
         if fuelManual() then
             notify("Заправка: еду за канистрой к генератору", 4)
         else
@@ -3569,21 +3742,6 @@ Night1:CreateToggle({
         end
     end,
 })
--- общий кулдаун на «горячие» кнопки с FireServer: двойной клик или
--- зажатие не должны шлеть серию одинаковых вызовов — тот же риск
--- Error 267, что мы уже лечили у автозаправки. Ключ включает аргумент
--- (Repair/Delivery — это 4+4 РАЗНЫХ кнопки, у каждой свой кулдаун).
-local fireAt = {}
-local function fireThrottle(key)
-    local now = os.clock()
-    if fireAt[key] and now - fireAt[key] < 2 then
-        notify("Подожди пару секунд между нажатиями (кулдаун 2с)", 1)
-        return false
-    end
-    fireAt[key] = now
-    return true
-end
-
 Night1:CreateButton({
     Name = "Флешнуть камеру",
     Callback = function()
@@ -3649,7 +3807,7 @@ for i = 1, 4 do
     Night2:CreateButton({
         Name = "Починить провод " .. n,
         Callback = function()
-            if not fireThrottle("Repair" .. n) then return end
+            if not fireThrottle("Repair") then return end
             local ok, err = n2Fire("Repair", n)
             if ok then
                 notify("Провод " .. n .. ": отправлен (если RepairWorker жив)",
@@ -3666,7 +3824,7 @@ for _, item in ipairs({ "Camera", "Lock", "UVLamp", "MotionSensor" }) do
     Night2:CreateButton({
         Name = "Доставка: " .. nm,
         Callback = function()
-            if not fireThrottle("Delivery" .. nm) then return end
+            if not fireThrottle("Delivery") then return end
             local ok, err = n2Fire("Delivery", nm)
             if ok then
                 notify("Доставка заказана: " .. nm, 2)
@@ -3690,9 +3848,17 @@ Night2:CreateButton({
         end
     end,
 })
+-- п.163: dupBusy объявлен ДО Revive: Revive посреди идущей серии =
+-- пара LoadCharacter быстрее кулдауна (Error 267) — серия первична,
+-- Revive ждёт её конца
+local dupBusy = false
 Night2:CreateButton({
     Name = "Revive (воскрешение)",
     Callback = function()
+        if dupBusy then
+            notify("Идёт серия дюпа — подожди её конца", 2)
+            return
+        end
         if not fireThrottle("LoadCharacter") then return end
         local ok, err = n2Fire("LoadCharacter")
         if ok then
@@ -3712,7 +3878,6 @@ Night2:CreateButton({
 -- Серия идёт в task.spawn: GUI не блокируется, повторная кнопка
 -- не пускает вторую серию (dupBusy).
 G.RM_DupN = math.clamp(G.RM_DupN or 5, 1, 10) -- повторов (слайдер)
-local dupBusy = false
 
 -- UI дюпа общий для всех трёх ночей (по просьбе юзера — «добавь во
 -- все ночи»). Без Flag: три слайдера с одним флагом конфликтуют бы в
@@ -3742,16 +3907,17 @@ local function makeDupUI(tab)
             task.spawn(function()
                 for i = 1, n do
                     if getgenv().RM_Run ~= RUN_ID then return end
-                    if i == 1 then
-                        -- свежий клик Revive мог недавно занять кулдаун —
-                        -- переждать без навязчивого notify от fireThrottle
-                        if fireAt["LoadCharacter"]
-                            and os.clock() - fireAt["LoadCharacter"] < 2 then
-                            task.wait(2.2)
-                            if getgenv().RM_Run ~= RUN_ID then return end
-                        end
-                    else
+                    -- п.167: перед КАЖДЫМ выстрелом — общий лимитер
+                    -- fireAt: клик Revive/другой кнопки посреди серии не
+                    -- даёт пару LoadCharacter быстрее кулдауна (шквал =
+                    -- Error 267); пауза самой серии 2.5с — для i > 1
+                    if i > 1 then
                         task.wait(2.5)
+                        if getgenv().RM_Run ~= RUN_ID then return end
+                    end
+                    local since = fireAt["LoadCharacter"]
+                    if since and os.clock() - since < 2 then
+                        task.wait(2.1 - (os.clock() - since))
                         if getgenv().RM_Run ~= RUN_ID then return end
                     end
                     local ok, err = n2Fire("LoadCharacter")
@@ -3784,7 +3950,15 @@ Night3:CreateKeybind({
     HoldToInteract = true,
     Flag = "RM_BindAim",
     Callback = function(on)
-        G.RM_AimMonster = (on == true)
+        -- п.172: Rayfield зовёт HoldToInteract-колбэк из Stepped БЕЗ
+        -- pcall и вне keybindConnections — зомби-цикл старого прогона
+        -- после re-run залипал бы G.RM_AimMonster = true до отпускания
+        -- клавиши (новый тогл показывал бы OFF, а камера горела);
+        -- guard по RUN_ID старого прогона его убивает
+        if getgenv().RM_Run ~= RUN_ID then return end
+        pcall(function()
+            G.RM_AimMonster = (on == true)
+        end)
     end,
 })
 makeDupUI(Night3)
@@ -3919,7 +4093,9 @@ local function tpToPoint(cf)
         notify("ТП: нет персонажа", 2)
         return
     end
-    pcall(function() smoothTP(hrp, cf) end)
+    -- force: явный ТП игрока работает и в окне паники (п.192 блокирует
+    -- только автоматические телепорты — возвраты автодействий)
+    pcall(function() smoothTP(hrp, cf, nil, true) end)
 end
 
 local function tpToNames(names, offset)
@@ -4289,14 +4465,28 @@ local PANIC_BUNKER = {
 local panicNames = { "Cabin4", "Cabin3", "Cabin2", "Cabin1", "Lodge",
     "Closet", "Wardrobe", "Bed" }
 
+local panicAt = 0 -- п.193: кулдаун повторной паники (удержание бинда)
 local function panicTP()
     if getgenv().RM_Run ~= RUN_ID then return end
+    -- п.193: удержание бинда/двойное нажатие не запускает параллельные
+    -- твины (Rayfield диспатчит каждое нажатие в отдельном потоке)
+    if os.clock() - panicAt < 4 then return end
+    panicAt = os.clock()
     local ch = LP.Character
     local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-    if not hrp then
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    -- п.193(в): у трупа HRP есть — телепорт трупа и «Паника → ...»
+    -- врал бы об успехе
+    if not hrp or not hum or hum.Health <= 0 then
         notify("Паника: нет персонажа", 2)
         return
     end
+    -- п.192: окно паники — автофичи не стартуют, их возвратные ТП не
+    -- откатывают игрока из укрытия; на время полёта держим мьютекс
+    -- (если автофича уже летела — её флаг мы вернём как есть)
+    G.RM_PanicUntil = os.clock() + 15
+    local hadBusy = pickupBusy
+    pickupBusy = true
     local pid = game.PlaceId
     local list = nil
     if pid == 14896802601 then
@@ -4310,7 +4500,10 @@ local function panicTP()
     if list and #list > 0 then
         local pick = list[math.random(#list)]
         local okTp = false
-        pcall(function() okTp = smoothTP(hrp, pick[2]) end)
+        pcall(function()
+            okTp = smoothTP(hrp, pick[2], nil, true)
+        end)
+        pickupBusy = hadBusy
         if getgenv().RM_Run ~= RUN_ID then return end
         -- smoothTP возвращает false при re-run/ошибке твина — не врём «Паника →»
         notify(okTp and ("Паника → " .. pick[1]) or "Паника: ТП не удался", 3)
@@ -4334,8 +4527,10 @@ local function panicTP()
             if pos then
                 local okN = false
                 pcall(function()
-                    okN = smoothTP(hrp, CFrame.new(pos + Vector3.new(0, 5, 3)))
+                    okN = smoothTP(hrp,
+                        CFrame.new(pos + Vector3.new(0, 5, 3)), nil, true)
                 end)
+                pickupBusy = hadBusy
                 if getgenv().RM_Run ~= RUN_ID then return end
                 notify(okN and ("Паника → " .. name)
                     or "Паника: ТП не удался", 3)
@@ -4343,6 +4538,7 @@ local function panicTP()
             end
         end
     end
+    pickupBusy = hadBusy
     notify("Паника: укрытий не нашёл", 3)
 end
 
@@ -4675,4 +4871,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.27 rayfield loaded | HOTFIX (v4.27): сентинел пустого бинда Unknown → ButtonX — Roblox отдаёт input.KeyCode = Enum.KeyCode.Unknown на клики мыши/колесо/тап (DevForum 4073073; фильтр RF 3277) → v4.26 запускал ВСЕ 10 биндов на каждый клик; свип витрины только по TextBox «KeybindBox», санити старого конфига — 3 прохода (4.6/5.6/7.6с) против гонки с LoadConfiguration | v4.26: бинды «None» (под капотом тогда был Unknown — ошибки ввода убраны), автосанити + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.28 rayfield loaded | ФИКСЫ v4.28 (баг-хант 20 зон, 233 находки, отчёт BUGHUNT_v4.26.md): Под землю — кэш коллизий публикуется в getgenv (re-run возвращает коллизии + поднимает на поверхность), ручной OFF поднимает с глубины, Noclip↔Под-землю читают чужие кэши | автоэлектрика — состояние ящика = намерение клика, а не слепой toggle (flip-flop «шаг 2/шаг 3» убран), пересадка ящика одним рейсом | Паника-ТП — кулдаун 4с, труп не телепортируется, окно паники 15с (автофичи не стартуют, возвраты не откатывают из укрытия, мьютекс на время полёта), ТП-кнопки с force | smoothTP — новый твин отменяет предыдущий (два твина больше не дрались за CFrame) + таймаут ожидания (уничтоженный HRP больше не вешает поток) | «Заправить сейчас» через лимитер (анти-Error 267) | серия дюпа — лимитер на КАЖДОМ шаге, Revive блок при серии | hold-бинд аимбота — guard от зомби-цикла после re-run | Repair/Delivery — общий кулдаун на ремоут (8 кнопок не рвут соединение) | v4.27: сентинел пустого бинда Unknown → ButtonX — Roblox отдаёт input.KeyCode = Enum.KeyCode.Unknown на клики мыши/колесо/тап (DevForum 4073073; фильтр RF 3277) → v4.26 запускал ВСЕ 10 биндов на каждый клик; свип витрины только по TextBox «KeybindBox», санити старого конфига — 3 прохода (4.6/5.6/7.6с) против гонки с LoadConfiguration | v4.26: бинды «None» (под капотом тогда был Unknown — ошибки ввода убраны), автосанити + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
