@@ -2810,68 +2810,311 @@ PlayerTab:CreateKeybind({
     end,
 })
 
--- ================= бессмертие (God Mode) =================
--- Клиентский долив HP (HealthChanged) + запрет клиентского состояния
--- Dead. Если сервер сам перезаписывает Humanoid.Health — остановить его
--- с клиента нельзя, но реактивный долив успевает между ударами.
-local godConn, godWatch
-local function godHook()
-    if getgenv().RM_Run ~= RUN_ID or not G.RM_God then return end
-    local ch = LP.Character
-    local hm = ch and ch:FindFirstChildOfClass("Humanoid")
-    if not hm or not hm.Parent then return end
-    if godConn then godConn:Disconnect() godConn = nil end
-    godConn = hm.HealthChanged:Connect(function(h)
-        if getgenv().RM_Run ~= RUN_ID or not G.RM_God then
-            if godConn then godConn:Disconnect() godConn = nil end
-            return
+-- ================= под землю при опасности (вместо God Mode) ========
+-- God Mode не спасал — сервер сам перезаписывает HP. Вместо него по
+-- запросу юзера: монстр ближе радиуса (слайдер, 100 ст по умолчанию) →
+-- персонаж УХОДИТ ПОД ЗЕМЛЮ. Камера и ходьба остаются прежними («для
+-- себя ничего не изменилось»), а сервер видит персонажа глубоко под
+-- поверхностью — монстр его не достаёт.
+-- Механика: CameraType=Scriptable + орбита камеры над точкой персонажа
+-- (XZ персонажа, Y = поверхность под ним); Y персонажа пинится каждый
+-- кадр, на время ухода коллизии выключены (свой noclip с возвратом
+-- исходных); XZ двигает штатный контроллер — WASD работает как обычно,
+-- т.к. направление ввода считается от текущей (нашей) камеры.
+-- Всплытие: монстр дальше радиуса + гистерезис 30 (или тогл OFF).
+G.RM_Under = false              -- тогл (без флага: всегда OFF на старте)
+G.RM_DangerR = G.RM_DangerR or 100 -- радиус опасности (слайдер с флагом)
+local under = nil           -- состояние погружения: nil = на поверхности
+local underScanAt = 0       -- последний скан опасности
+local UNDER_DEPTH = 40      -- глубина под поверхностью, ст
+
+-- ближайший монстр/мутант (кэши ESP заполняются всегда, тоглы ESP не
+-- нужны — секундный scanEsp и mutant-скан крутятся с самого старта)
+local function underNearest(fromPos)
+    local best
+    local function consider(inst)
+        if not inst or not inst.Parent then return end
+        local root = inst:FindFirstChild("HumanoidRootPart", true)
+            or inst:FindFirstChild("Head", true)
+        if root then
+            local d = (root.Position - fromPos).Magnitude
+            if not best or d < best then best = d end
         end
-        pcall(function()
-            if h < hm.MaxHealth then hm.Health = hm.MaxHealth end
-        end)
+    end
+    for _, e in ipairs(espCache) do
+        if e.kind == "monster" then consider(e.inst) end
+    end
+    for _, e in ipairs(mutantCache) do consider(e.model) end
+    return best
+end
+
+local function underRay(pos, dir)
+    local res = nil
+    pcall(function()
+        local p = RaycastParams.new()
+        p.FilterType = Enum.RaycastFilterType.Exclude
+        p.FilterDescendantsInstances = {LP.Character}
+        local hit = workspace:Raycast(pos, dir, p)
+        res = hit and hit.Position.Y
+    end)
+    return res
+end
+
+-- пол под ногами (на поверхности — луч вниз от груди)
+local function underGroundY(pos)
+    return underRay(pos, Vector3.new(0, -700, 0))
+end
+
+-- поверхность над головой (под землёй — луч вверх: первый потолок =
+-- изнанка земли). Нужна, пока персонаж уже под землёй
+local function underCeilY(pos)
+    return underRay(pos, Vector3.new(0, 400, 0))
+end
+
+local function underFinish()
+    local st = under
+    if not st then return end
+    under = nil
+    G.RM_UnderActive = false
+    -- вернуть свои коллизии (если не включён обычный Noclip — он со
+    -- своим кешем восстановит сам)
+    pcall(function()
+        if not G.RM_Noclip then
+            for part, was in pairs(st.noclipWas) do
+                if part.Parent then part.CanCollide = was end
+            end
+        end
     end)
     pcall(function()
-        hm:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
-        if hm.Health < hm.MaxHealth then hm.Health = hm.MaxHealth end
+        local cam = workspace.CurrentCamera
+        if st.prevCam then cam.CameraType = st.prevCam end
     end)
+    print("[RM] Под землю: всплытие")
 end
-local function setGod(on, silent)
-    G.RM_God = on
-    if godConn then godConn:Disconnect() godConn = nil end
-    if godWatch then godWatch:Disconnect() godWatch = nil end
-    if not on then
-        -- возвращаем клиенту возможность умереть (как было)
-        pcall(function()
-            local ch = LP.Character
-            local hm = ch and ch:FindFirstChildOfClass("Humanoid")
-            if hm then
-                hm:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
-            end
-        end)
-        if not silent then notify("Бессмертие: OFF", 2) end
+
+local function underStart(hrp, cam)
+    local gy = underGroundY(hrp.Position)
+    if not gy then gy = hrp.Position.Y - 3 end
+    local st = {
+        char = LP.Character,
+        groundY = gy,
+        standOff = hrp.Position.Y - gy, -- высота стояния (для всплытия)
+        curY = hrp.Position.Y,          -- пин-высота (переход к цели)
+        diving = true,                  -- true = держимся под землёй
+        noclipWas = {},                 -- исходные коллизии частей
+        parts = {}, partsAt = 0,
+        groundAt = 0, lastT = os.clock(),
+        prevCam = cam and cam.CameraType,
+        yaw = 0, pitch = 0.2, zoom = 14,
+    }
+    -- орбита из текущей камеры — без видимого скачка при погружении
+    pcall(function()
+        local dir = -cam.CFrame.LookVector
+        st.pitch = math.asin(math.clamp(dir.Y, -1, 1))
+        st.yaw = math.atan2(dir.X, dir.Z)
+        st.zoom = math.clamp((cam.CFrame.Position
+            - (hrp.Position + Vector3.new(0, 2.2, 0))).Magnitude, 6, 45)
+    end)
+    under = st
+    G.RM_UnderActive = true
+    print("[RM] Под землю: погружение, глубина " .. UNDER_DEPTH .. " ст")
+end
+
+local function underFrame()
+    -- self-disconnect при re-run: иначе прошлый прогон живёт вечно
+    if getgenv().RM_Run ~= RUN_ID then
+        pcall(function() RunService:UnbindFromRenderStep("RMUnderground") end)
         return
     end
-    godHook()
-    -- новый спавн/перезаход — подписываемся заново
-    godWatch = LP.CharacterAdded:Connect(function()
-        if getgenv().RM_Run ~= RUN_ID or not G.RM_God then
-            if godWatch then godWatch:Disconnect() godWatch = nil end
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        local ch = LP.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        local now = os.clock()
+        if not hrp then
+            if under then underFinish() end
             return
         end
-        task.wait(1)
-        if getgenv().RM_Run ~= RUN_ID or not G.RM_God then return end
-        godHook()
+        -- респавн под землёй: чистим состояние, скан переоценит угрозу
+        if under and under.char ~= ch then underFinish() end
+
+        -- авто-погружение/всплытие: скан каждые 0.35с
+        if now - underScanAt > 0.35 then
+            underScanAt = now
+            local R = G.RM_DangerR or 100
+            -- дистанция меряем от ТОЧКИ НА ПОВЕРХНОСТИ (ghost): монстр,
+            -- стоящий над тобой, — это всё ещё опасно, под землёй мы
+            local gp = under
+                and Vector3.new(hrp.Position.X, under.groundY,
+                    hrp.Position.Z)
+                or hrp.Position
+            local d = underNearest(gp)
+            if not under and d and d < R then
+                underStart(hrp, cam)
+            elseif under and under.diving and (not d or d > R + 30) then
+                under.diving = false -- монстр ушёл — всплываем
+            elseif under and not under.diving and d and d < R then
+                under.diving = true -- вернулся — снова вниз
+            end
+        end
+        local st = under
+        if not st then return end
+
+        -- поверхность под точкой обновляем, пока под землёй (0.4с):
+        -- земля неровная, ghost-камера идёт по рельефу
+        if st.diving and now - st.groundAt > 0.4 then
+            st.groundAt = now
+            local gy = underCeilY(hrp.Position)
+            if gy then st.groundY = gy end
+        end
+
+        local dt = math.min(now - st.lastT, 0.1) -- потолок на свитчах
+        st.lastT = now
+
+        -- цель Y: под землёй / поверхность + линейный переход
+        local goalY = st.diving
+            and (st.groundY - UNDER_DEPTH)
+            or (st.groundY + st.standOff)
+        local dy = goalY - st.curY
+        local step = dt * 140 -- скорость ухода/всплытия (~0.3с)
+        if math.abs(dy) <= step then
+            st.curY = goalY
+        else
+            st.curY = st.curY + (dy > 0 and step or -step)
+        end
+        -- пин Y: гравитация тянет вниз, кадр держит высоту (XZ не
+        -- трогаем — ими владеет штатный контроллер/WASD и твины ТП)
+        local pos = hrp.Position
+        if math.abs(pos.Y - st.curY) > 0.02 then
+            local v = hrp.AssemblyLinearVelocity
+            hrp.AssemblyLinearVelocity = Vector3.new(v.X, 0, v.Z)
+            hrp.CFrame = CFrame.new(pos.X, st.curY, pos.Z)
+                * (hrp.CFrame - hrp.CFrame.Position)
+        end
+
+        -- сквозь землю: свои коллизии всё время состояния (кеш 0.5с,
+        -- как у Noclip — не дёргаем GetDescendants каждый кадр)
+        if now - st.partsAt > 0.5 then
+            st.partsAt = now
+            table.clear(st.parts)
+            for _, dd in ipairs(ch:GetDescendants()) do
+                if dd:IsA("BasePart") then
+                    st.parts[#st.parts + 1] = dd
+                end
+            end
+        end
+        for _, pp in ipairs(st.parts) do
+            if pp.Parent and pp:IsA("BasePart") then
+                if st.noclipWas[pp] == nil then
+                    st.noclipWas[pp] = pp.CanCollide
+                end
+                if pp.CanCollide then pp.CanCollide = false end
+            end
+        end
+
+        -- камера: орбита над точкой персонажа (Y поверхности) —
+        -- «для себя ничего не изменилось», мы просто смотрим сверху
+        local tgt = Vector3.new(pos.X, st.groundY, pos.Z)
+            + Vector3.new(0, 2.2, 0)
+        local cp = math.cos(st.pitch)
+        local dirv = Vector3.new(cp * math.sin(st.yaw),
+            math.sin(st.pitch), cp * math.cos(st.yaw))
+        cam.CameraType = Enum.CameraType.Scriptable
+        cam.CFrame = CFrame.lookAt(tgt + dirv * st.zoom, tgt)
+
+        -- всплыли полностью — полное восстановление
+        if not st.diving and st.curY >= goalY - 0.01 then
+            underFinish()
+        end
     end)
-    if not silent then notify("Бессмертие: ON", 2) end
 end
+
+-- мышь: тянем вид (колесо — зум), только пока под землёй и только когда
+-- фокус не в чате/поиске (как у TP walk — не вращаем камеру при наборе)
+local underM1
+local function underInput(on)
+    if underM1 then underM1:Disconnect() underM1 = nil end
+    if not on then return end
+    underM1 = UIS.InputChanged:Connect(function(inp, gp)
+        if getgenv().RM_Run ~= RUN_ID or not G.RM_Under or not under then
+            return
+        end
+        if gp then return end -- курсор над GUI — камеру не дёргаем
+        if inp.UserInputType == Enum.UserInputType.MouseMovement then
+            if UIS:GetFocusedTextBox() then return end
+            under.yaw = under.yaw - inp.Delta.X * 0.004
+            under.pitch = math.clamp(
+                under.pitch + inp.Delta.Y * 0.004, -0.5, 1.35)
+        elseif inp.UserInputType == Enum.UserInputType.MouseWheel then
+            under.zoom = math.clamp(under.zoom - inp.Position.Z * 2.5, 6, 45)
+        end
+    end)
+end
+
+local function setUnder(on, silent)
+    G.RM_Under = on == true
+    if on then
+        pcall(function()
+            RunService:UnbindFromRenderStep("RMUnderground")
+            -- приоритет Camera.Value: после штатной камеры и ДО аимбота
+            -- (тот на +1 — его lookAt сохранит нашу позицию камеры)
+            RunService:BindToRenderStep("RMUnderground",
+                Enum.RenderPriority.Camera.Value, underFrame)
+        end)
+        underInput(true)
+        if not silent then
+            notify("Под землю: ON — монстр ближе "
+                .. tostring(G.RM_DangerR or 100)
+                .. " ст → уход под землю", 4)
+        end
+    else
+        pcall(function() RunService:UnbindFromRenderStep("RMUnderground") end)
+        underInput(false)
+        underFinish()
+        if not silent then notify("Под землю: OFF", 2) end
+    end
+end
+
+-- re-run: предыдущий прогон мог остаться под землёй (камера Scriptable,
+-- персонаж ниже поверхности) — восстанавливаем ДО создания тогла
+if G.RM_UnderActive then
+    G.RM_UnderActive = false
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        if cam and cam.CameraType == Enum.CameraType.Scriptable then
+            cam.CameraType = Enum.CameraType.Custom
+        end
+    end)
+    pcall(function()
+        local ch = LP.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            local gy = underCeilY(hrp.Position)
+            if gy and gy > hrp.Position.Y + 15 then
+                hrp.CFrame = CFrame.new(
+                    hrp.Position.X, gy + 3, hrp.Position.Z)
+            end
+        end
+    end)
+end
+
+PlayerTab:CreateSection("Спасение от монстра")
 PlayerTab:CreateToggle({
-    Name = "Бессмертие (God Mode)",
-    CurrentValue = G.RM_God == true,
-    Callback = function(v) setGod(v) end,
+    Name = "Под землю при опасности (вместо God Mode)",
+    CurrentValue = false,
+    Callback = function(v) setUnder(v) end,
 })
--- re-run: тогл пересоздаётся «выкл», а G.RM_God мог пережить перезапуск —
--- перевешиваем подписки молча (без второго уведомления)
-if G.RM_God == true then setGod(true, true) end
+PlayerTab:CreateSlider({
+    Name = "Радиус опасности",
+    Range = {30, 300},
+    Increment = 10,
+    Suffix = " st",
+    CurrentValue = G.RM_DangerR,
+    Flag = "RM_DangerR",
+    Callback = function(v)
+        G.RM_DangerR = v
+    end,
+})
 
 PlayerTab:CreateSection("Прочее")
 PlayerTab:CreateButton({
@@ -4246,4 +4489,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.22 rayfield loaded | НОВОЕ: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.23 rayfield loaded | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
