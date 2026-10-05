@@ -42,8 +42,11 @@ local G = getgenv()
 getgenv().RM_Run = (getgenv().RM_Run or 0) + 1
 local RUN_ID = getgenv().RM_Run
 -- старые артефакты прошлого прогона (скрипт выполнили повторно):
--- экраны ESP/плашки + окно Rayfield в CoreGui (чужие хабы в
--- gethui/PlayerGui не трогаем — только то, что у нас в CoreGui)
+-- экраны ESP/плашки + своё окно Rayfield в CoreGui. Чужие хабы в
+-- gethui/PlayerGui не трогаем; чужой Rayfield в CoreGui узнаём по
+-- signature — на ПЕРВОМ запуске (RM_Run == 1) его не трогаем,
+-- иначе убивалось бы любое чужое окно этой библиотеки. На re-run
+-- чистим: там обязано быть наше окно прошлого прогона.
 pcall(function()
     for _, g in ipairs(game:GetService("CoreGui"):GetChildren()) do
         if g:IsA("ScreenGui") then
@@ -56,7 +59,7 @@ pcall(function()
                     local m = g:FindFirstChild("Main", true)
                     isRF = m ~= nil and m:FindFirstChild("Topbar") ~= nil
                 end
-                if isRF then g:Destroy() end
+                if isRF and getgenv().RM_Run > 1 then g:Destroy() end
             end
         end
     end
@@ -98,36 +101,51 @@ end
 -- TP walk не тут: он и так двигает каждый кадр маленькими шажками.
 local TweenService = game:GetService("TweenService")
 
+-- Возвращает true, только если долетели И скрипт не перезапускали:
+-- после Completed:Wait() старый прогон при re-run обязан прекратить
+-- свои действия — иначе два прогона тянут персонаж в разные точки.
 local function smoothTP(hrp, cf, dur)
+    if getgenv().RM_Run ~= RUN_ID then return false end
     if not dur then
         local spd = tonumber(G.RM_TweenSpeed) or 500
         dur = math.clamp(
             (cf.Position - hrp.Position).Magnitude / spd, 0.05, 3)
     end
+    local okDone = false
     pcall(function()
         local tw = TweenService:Create(hrp,
             TweenInfo.new(dur, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
             { CFrame = cf })
         tw:Play()
         tw.Completed:Wait()
+        okDone = true
     end)
+    if getgenv().RM_Run ~= RUN_ID then return false end
+    if not hrp or not hrp.Parent then return false end
+    return okDone
 end
 
--- оригинальные значения освещения, снятые при запуске:
--- выключение fullbright/no-fog должно ВОЗВРАЩАТЬ темноту,
--- а не оставлять наши записи висеть
-local ORIG = {}
+-- оригинальные значения освещения, снятые при ПЕРВОМ запуске:
+-- выключение fullbright/no-fog должно ВОЗВРАЩАТЬ темноту.
+-- Снимок живёт в getgenv(): при re-run старый прогон мог уже
+-- выкрутить свет — снимок «оригинала» с изменённого состояния
+-- сломал бы восстановление (после выключения остался бы fullbright)
 local BRIGHT = {"Brightness", "ClockTime", "Ambient", "OutdoorAmbient",
     "ColorShift_Top", "ColorShift_Bottom", "ExposureCompensation",
     "EnvironmentDiffuseScale", "EnvironmentSpecularScale"}
 local FOG = {"GlobalShadows", "FogStart", "FogEnd", "FogColor"}
-for _, name in ipairs(BRIGHT) do
-    local ok, v = pcall(function() return Lighting[name] end)
-    if ok then ORIG[name] = v end
-end
-for _, name in ipairs(FOG) do
-    local ok, v = pcall(function() return Lighting[name] end)
-    if ok then ORIG[name] = v end
+local ORIG = G.RM_ORIG
+if not ORIG then
+    ORIG = {}
+    for _, name in ipairs(BRIGHT) do
+        local ok, v = pcall(function() return Lighting[name] end)
+        if ok then ORIG[name] = v end
+    end
+    for _, name in ipairs(FOG) do
+        local ok, v = pcall(function() return Lighting[name] end)
+        if ok then ORIG[name] = v end
+    end
+    G.RM_ORIG = ORIG
 end
 
 local function restoreGroup(list)
@@ -138,8 +156,9 @@ local function restoreGroup(list)
 end
 
 -- снимок Atmosphere (туман от неё перебивает Lighting.FogEnd —
--- если гасить только Fog*, туман всё равно остаётся)
-local ATM_ORIG = nil
+-- если гасить только Fog*, туман всё равно остаётся). Снимок в
+-- getgenv(): при re-run не переснимаем уже погашенный туман
+-- как «оригинал» (иначе выключение не вернёт бы туман вообще)
 
 local function applyLight()
     if G.RM_FB then
@@ -163,8 +182,8 @@ local function applyLight()
         pcall(function()
             local a = Lighting:FindFirstChildOfClass("Atmosphere")
             if a then
-                if not ATM_ORIG then
-                    ATM_ORIG = { Density = a.Density, Haze = a.Haze, Offset = a.Offset }
+                if not G.RM_ATM_ORIG then
+                    G.RM_ATM_ORIG = { Density = a.Density, Haze = a.Haze, Offset = a.Offset }
                 end
                 setProp(a, "Density", 0)
                 setProp(a, "Haze", 0)
@@ -176,12 +195,13 @@ local function applyLight()
         restoreGroup(FOG)
         -- вернуть туман Atmosphere как было
         pcall(function()
-            if ATM_ORIG then
+            local o = G.RM_ATM_ORIG
+            if o then
                 local a = Lighting:FindFirstChildOfClass("Atmosphere")
                 if a then
-                    setProp(a, "Density", ATM_ORIG.Density)
-                    setProp(a, "Haze", ATM_ORIG.Haze)
-                    setProp(a, "Offset", ATM_ORIG.Offset)
+                    setProp(a, "Density", o.Density)
+                    setProp(a, "Haze", o.Haze)
+                    setProp(a, "Offset", o.Offset)
                 end
             end
         end)
@@ -191,12 +211,19 @@ end
 -- ================= камера: 1-е лицо / 3-е (сзади) =================
 -- "game" — как в игре (трогаем один раз), "first"/"third" — держим
 -- принудительно каждый кадр, перекрывая локи игры.
-local CAM_ORIG = { mode = Enum.CameraMode.Classic, min = 0.5, max = 12.8 }
-pcall(function()
-    CAM_ORIG.mode = LP.CameraMode
-    CAM_ORIG.min = LP.CameraMinZoomDistance
-    CAM_ORIG.max = LP.CameraMaxZoomDistance
-end)
+local CAM_ORIG = G.RM_CAM_ORIG
+if not CAM_ORIG then
+    CAM_ORIG = { mode = Enum.CameraMode.Classic, min = 0.5, max = 12.8 }
+    pcall(function()
+        CAM_ORIG.mode = LP.CameraMode
+        CAM_ORIG.min = LP.CameraMinZoomDistance
+        CAM_ORIG.max = LP.CameraMaxZoomDistance
+    end)
+    -- снимок в getgenv(): при re-run не переснимаем камеру,
+    -- уже переключенную старым прогоном (иначе «Как в игре»
+    -- восстанавливало бы наш же лок 1-го лица)
+    G.RM_CAM_ORIG = CAM_ORIG
+end
 
 local function camViewName()
     if G.RM_CamMode == "first" then return "1-е лицо" end
@@ -224,8 +251,13 @@ pcall(applyCam)
 -- Свет и камера перепроверяются на КАЖДОМ кадре (запись — только если
 -- что-то реально изменилось). Раньше опрос раз в секунду давал
 -- мерцание: игра успевала вернуть темноту между опросами.
-RunService.RenderStepped:Connect(function()
-    if getgenv().RM_Run ~= RUN_ID then return end
+local lightConn
+lightConn = RunService.RenderStepped:Connect(function()
+    if getgenv().RM_Run ~= RUN_ID then
+        -- старый прогон отписывается сам — не держим замыкание на кадре
+        if lightConn then lightConn:Disconnect() lightConn = nil end
+        return
+    end
     if G.RM_FB then pcall(applyLight) end
     if G.RM_CamMode ~= "game" then pcall(applyCam) end
 end)
@@ -256,10 +288,14 @@ local function moveKeys()
     return x, z, sprint
 end
 
-RunService.RenderStepped:Connect(function(dt)
-    if getgenv().RM_Run ~= RUN_ID then return end
+local walkConn, walkWarnAt = nil, 0
+walkConn = RunService.RenderStepped:Connect(function(dt)
+    if getgenv().RM_Run ~= RUN_ID then
+        if walkConn then walkConn:Disconnect() walkConn = nil end
+        return
+    end
     if not G.RM_TPSpeed or pickupBusy then return end
-    pcall(function()
+    local okW, errW = pcall(function()
         local cam = workspace.CurrentCamera
         if not cam then return end
         local ch = LP.Character
@@ -269,8 +305,15 @@ RunService.RenderStepped:Connect(function(dt)
         local x, z, sprint = moveKeys()
         if x == 0 and z == 0 then return end
 
-        camFwd = Vector3.new(cam.CFrame.LookVector.X, 0, cam.CFrame.LookVector.Z).Unit
-        camRight = Vector3.new(cam.CFrame.RightVector.X, 0, cam.CFrame.RightVector.Z).Unit
+        -- LookVector ровно вверх/вниз (камера у потолка/пола) даёт
+        -- нулевую горизонтальную проекцию: .Unit тут = NaN →
+        -- персонаж улетал в пустоту. Без движения — просто выходим.
+        local lv, rv = cam.CFrame.LookVector, cam.CFrame.RightVector
+        camFwd = Vector3.new(lv.X, 0, lv.Z)
+        camRight = Vector3.new(rv.X, 0, rv.Z)
+        if camFwd.Magnitude < 0.001 or camRight.Magnitude < 0.001 then return end
+        camFwd = camFwd.Unit
+        camRight = camRight.Unit
 
         local spd = (G.RM_TPSpeedVal or 50) * sprint
         local step = spd * math.min(dt, 0.05)
@@ -379,6 +422,15 @@ RunService.RenderStepped:Connect(function(dt)
 
         hrp.CFrame = CFrame.new(np) * (hrp.CFrame - hrp.CFrame.Position)
     end)
+    -- молча не глотаем ошибки, но и не спамим каждым кадром:
+    -- warn не чаще раза в 5 секунд
+    if not okW then
+        local now = os.clock()
+        if now - walkWarnAt > 5 then
+            walkWarnAt = now
+            warn("[RM] TP walk: " .. tostring(errW))
+        end
+    end
 end)
 
 -- ================= infinite stamina (разовое обнаружение + лок) =================
@@ -474,6 +526,10 @@ local function discoverStaminaOnce()
             best = cands[i]
         end
     end
+    -- без реального разброса (при замере не бегали) это НЕ стамина:
+    -- писать max в случайное значение — десинк и кик Error 267.
+    -- nil = следующий цикл повторит обнаружение
+    if not best or (best.mx - best.mn) < 0.5 then return nil end
     local okN, fn = pcall(function() return best.v:GetFullName() end)
     return { v = best.v, max = best.mx, path = okN and fn or best.v.Name }
 end
@@ -774,8 +830,12 @@ task.spawn(function()
     end
 end)
 
-RunService.RenderStepped:Connect(function()
-    if getgenv().RM_Run ~= RUN_ID then return end
+local mutantDrawConn
+mutantDrawConn = RunService.RenderStepped:Connect(function()
+    if getgenv().RM_Run ~= RUN_ID then
+        if mutantDrawConn then mutantDrawConn:Disconnect() mutantDrawConn = nil end
+        return
+    end
     pcall(function()
         local on = G.RM_MutantESP
         local lpch = LP.Character
@@ -1164,17 +1224,22 @@ local function doPickup(e)
     local origin = hrp.CFrame
     pcall(function()
         if dist > math.max(maxD - 3, 2) then
-            -- телепорт рядом с предметом: для сервера — «игрок стоял рядом»
-            smoothTP(hrp, CFrame.new(pos + Vector3.new(0, 3, 0))
-                * (hrp.CFrame - hrp.CFrame.Position))
-            teleported = true
+            -- телепорт рядом с предметом: для сервера — «игрок стоял рядом».
+            -- true только если долетели: после re-run smoothTP вернёт false
+            teleported = smoothTP(hrp, CFrame.new(pos + Vector3.new(0, 3, 0))
+                * (hrp.CFrame - hrp.CFrame.Position)) == true
         end
     end)
+    -- после каждого yield — проверка re-run: старый прогон не кликает
+    -- и не телепортирует (его pickupBusy — свой upvalue, новый он не трогает)
+    if getgenv().RM_Run ~= RUN_ID then return end
     if teleported then task.wait(0.1) end -- позиция успевает дойти до сервера
+    if getgenv().RM_Run ~= RUN_ID then return end
     pcall(function() fireItem(e) end)
     e.clickAt = os.clock() -- кулдаун по каждой цели — из слайдера «Скорость действий»
     if teleported then
         task.wait(0.05)
+        if getgenv().RM_Run ~= RUN_ID then return end
         pcall(function() smoothTP(hrp, origin) end)
     end
     task.wait(0.1)
@@ -1887,8 +1952,12 @@ RunService:BindToRenderStep("RMAimMonster", Enum.RenderPriority.Camera.Value + 1
 end)
 
 -- ===== рендер меток/хайлайтов каждый кадр =====
-RunService.RenderStepped:Connect(function()
-    if getgenv().RM_Run ~= RUN_ID then return end
+local espDrawConn
+espDrawConn = RunService.RenderStepped:Connect(function()
+    if getgenv().RM_Run ~= RUN_ID then
+        if espDrawConn then espDrawConn:Disconnect() espDrawConn = nil end
+        return
+    end
     pcall(function()
         local ch = LP.Character
         local myHRP = ch and ch:FindFirstChild("HumanoidRootPart")
@@ -3284,4 +3353,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.17 rayfield loaded | NEW: Infinite Battery (фонарь), Тревога кабины (OpenDoor), print спавна мутанта, бункер-кнопки (сейф/6 утра/вентиляция/гриды 1-4 + чистка) + гейт на плейс бункера | v4.16: Mutant ESP состояние ДОГОНЯЕТ/ИЩЕТ | РЕВИЗИЯ v4.15: .Position у ClickDetector, GameId, FusesFried-гейт | Infinite O2 (V) / Noclip (F) / Auto Scare / камин | Ночь 2: капсула+ремоуты | ТП новая карта Н2 | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.18 rayfield loaded | РЕВИЗИЯ: re-run (ORIG-снимки света/тумана/камеры в getgenv, smoothTP возвращает ok + гвард RUN_ID, doPickup не кликает после re-run, RenderStepped отписывается сам, NaN-защита камеры TP walk, warn с троттлингом, стамина: порог разброса 0.5, чужие Rayfield не трогаем на 1-м запуске) | v4.17: Infinite Battery (фонарь), Тревога кабины (OpenDoor), бункер-кнопки | v4.16: Mutant ESP ДОГОНЯЕТ/ИЩЕТ | Infinite O2 (V) / Noclip (F) | Ночь 2: капсула+ремоуты | ТП новая карта Н2 | ESP | Settings")

@@ -87,6 +87,12 @@
 | ScriptBlox | **челлендж решён**: HMAC-SHA256(cookie=`ScR1ptBlx`, данные=`encodeURIComponent(UA)+time`) → cookie `__scriptblox_validation=?token...` + `__scriptblox_ua_`; API **`/api/script/<slug>`** отдаёт JSON с кодом; описания фич вытаскиваются с карточек. Коды большинства скриптов — под логином/обфусцированы |
 | pastefy / roscripts / MyzorithHub / Spirit Helper | только реклама или VM-обфускация — **брать нечего** |
 | rscripts.net | HTTP 403 |
+| youdontknow-creator/RMUH (GitHub, читаемый) | полный набор ТП: `Pumpkin_1..7.Spot`, `PressurePanels`, `WorkerHead`, `Shotgun`, `AmmoPiles`, `Haunted Mansion`, `Teddy bear`, `FakeCandyBag`, `workspace.FuseBox`, бункер-точки (y≈82), «SafeSpot», «Auto Memorie (Wip)»; табы Night 1/2/3, Spirit Helper, Mansion Incident. `kick.Name = ""` (переименование античит-ремоута) — **НЕ делаем** |
+| GitHubTestei/ResidenceMassacre (Rayfield, читаемый) | ТП-названия: O2 / power box / inside / downstairs closet / boards / radio; «Monster ESP (fixed) notification»; CF `-80,4,-134`, `-5,4,-98`, `-40,23,-68` |
+| frank590-star (Night 1, читаемый) | `Teleport_Locations = {Shack=(-79,4.5,-129), FuseBox=(-1,4.5,-92.5), Entrance=(-11.5,4.6,-24.2)}`, `workspace.Mutant.Spy`, `Asphyxia`, `HotChocolate` |
+| TheGuestON / Pixeluted (GitHub) | ТП-точки (`FrontDoor/SoundPart/Growling`, ген `-79.725,4.675,-132.755`); Pixeluted старый (2023), содержит обходы (adonis/hookmetamethod) — только структуры |
+| ScriptBlox-снippets выдачи | 241706: auto-wire, Larry spawn notifier; 55878: **kid detector**, remove danger, inf Sprint; 61029: esp abomination (Barry), esp gen/jerrycan, tp safeplace |
+| GitHub-скан (2026-10, новый проход) | новых работающих raw/gist/pastefy с кодом СВЕРХ известных не найдено; обф подтверждён: ApexScript0x/RM (MoonVeil 242КБ), manfac9000 (таблица `\068\066…`), flopa2677 (MoonSec); TheGuestON-лоадер → pastebin `PTg2vat8` = 404 |
 
 ## Известные несделанное (осознанно)
 
