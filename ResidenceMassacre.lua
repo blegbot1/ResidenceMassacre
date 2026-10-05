@@ -2406,8 +2406,12 @@ local Window = Rayfield:CreateWindow({
     KeySystem = false,
     -- дефолтный хоткей Rayfield — K, а K у нас «Auto PowerCell»:
     -- без своего ключа одно нажатие и прятало окно, и переключало фичу.
-    -- RightShift: строка-значение = имя KeyCode (валидация в CreateWindow)
-    ToggleUIKeybind = "RightShift",
+    -- ПРАВИЛЬНО — только EnumItem: строку Rayfield прогоняет через
+    -- string.upper ("RightShift" → "RIGHTSHIFT") и Enum.KeyCode[...] с
+    -- неверным регистром кидает ошибку в CreateWindow — всё окно не
+    -- создавалось (так и сломалось в v4.22). EnumItem-ветка пишет
+    -- в конфиг keybind.Name ("RightShift") — как надо
+    ToggleUIKeybind = Enum.KeyCode.RightShift,
 })
 
 -- ==== поиск окна Rayfield: CoreGui / gethui() / RobloxGui / PlayerGui ====
@@ -4489,4 +4493,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.23 rayfield loaded | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.24 rayfield loaded | HOTFIX: ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
