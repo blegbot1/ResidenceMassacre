@@ -674,6 +674,28 @@ local function removeMutant(m)
     end
 end
 
+-- состояние мутанта из Character.Config (читаемо на клиенте, путь сверен
+-- с открытым исходником script-sources/residence-massacre):
+-- Chasing = бежит за целью, Seeking = ищет, Active = активен
+local function boolVal(parent, name)
+    local v = parent:FindFirstChild(name)
+    if v then
+        local ok, val = pcall(function() return v.Value end)
+        if ok then return val == true end
+    end
+    local a = parent:GetAttribute(name)
+    return a == true
+end
+
+local function mutantState(m)
+    local cfg = m:FindFirstChild("Config", true)
+    if not cfg then return "", false end
+    if boolVal(cfg, "Chasing") then return " — ДОГОНЯЕТ!", true end
+    if boolVal(cfg, "Seeking") then return " — ИЩЕТ", false end
+    if boolVal(cfg, "Active") then return " — активен", false end
+    return "", false
+end
+
 -- первичный поиск
 pcall(function()
     for _, d in ipairs(workspace:GetDescendants()) do
@@ -698,6 +720,19 @@ task.spawn(function()
         pcall(function()
             for _, d in ipairs(workspace:GetDescendants()) do
                 if isMutantModel(d) then addMutant(d) end
+            end
+            -- погоня: одно сообщение на переход (Config.Chasing)
+            for _, e in ipairs(mutantCache) do
+                local mm = e.model
+                local chasing = false
+                if mm and mm.Parent then
+                    local cfg = mm:FindFirstChild("Config", true)
+                    chasing = cfg ~= nil and boolVal(cfg, "Chasing")
+                end
+                if chasing and not e.chasing then
+                    print("[RM] Мутант: ПРЕСЛЕДУЕТ кого-то (Chasing)")
+                end
+                e.chasing = chasing
             end
         end)
         task.wait(1)
@@ -734,7 +769,15 @@ RunService.RenderStepped:Connect(function()
                         local dist = (root.Position - myHRP.Position).Magnitude
                         local hum = m:FindFirstChildOfClass("Humanoid")
                         local hp = (hum and hum.Health > 0) and math.floor(hum.Health) or "?"
-                        e.lbl.Text = ("MUTANT [%dm] HP %s"):format(math.floor(dist), tostring(hp))
+                        local st, danger = mutantState(m)
+                        e.lbl.Text = ("MUTANT [%dm] HP %s%s")
+                            :format(math.floor(dist), tostring(hp), st)
+                        -- красным при погоне, иначе — обычный цвет ESP
+                        local col = danger and Color3.fromRGB(255, 60, 60)
+                            or G.RM_MutantColor
+                        if e.lbl.TextColor3 ~= col then
+                            e.lbl.TextColor3 = col
+                        end
                         e.gui.Adornee = root
                         show = true
                     end
