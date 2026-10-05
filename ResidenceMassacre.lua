@@ -4346,16 +4346,19 @@ end)
 -- ESP (v4.32): юзер попросил «1 нажать и всё подсвечивалось» — отдельный
 -- тогл из «Воспоминаний» убран (G.RM_MemMonsterESP больше не используется)
 
--- ============== Auto Farm: Хэллоуин (Воспоминания, v4.33) ============
--- По описанию юзера + его скринам Explorer:
+-- ============== Auto Farm: Хэллоуин (Воспоминания, v4.35) ============
+-- По описанию юзера (уточнение v4.35: цепочка мешок → миска → детям,
+-- на стук решаем по ESP ребёнок ли это; для чужих — «Не замечать»):
 -- 1) база — СПЕРЕДИ камина (LivingRoomFurniture/Model/Fireplace); переезды
 --    идут общим smoothTP = TweenService (с отменой предыдущего твина)
--- 2) конфеты: CandyBowl.ClickDetector рядом с миской (слоты 1/2/3 — полной
---    хватает ~3 раза; дальше клик «наполнять» — тот же ClickDetector)
--- 3) ребёнок у двери: в PlayerGui всплывает меню («Open / Unnoticed») →
---    сами жмём Open (getconnections, фолбэк — клик VirtualInputManager);
---    затем едем к FrontDoor.Hitbox.ClickDetector и кормим — ТОЛЬКО при
---    конфете в руках (флаг candyHeld + поиск «candy» в персонаже/рюкзаке)
+-- 2) конфеты цепочкой: FakeCandyBag (мешок) → CandyBowl (миска, слоты
+--    1/2/3 — полной хватает ~3 раза) — одна поездка, два клика; конфета
+--    «из миски» в руках = флаг candyHeld + поиск «candy» в персонаже
+-- 3) стук в дверь (меню «Open / Unnoticed» в PlayerGui, тексты EN/RU):
+--    каждые 5с осмотр двери — консоль пишет «у двери — ребёнок/монстр/
+--    пусто»; ребёнок (GhostChild у двери) → добираем конфеты мешок→миска
+--    и жмём «Открыть», затем раздача через FrontDoor.Hitbox.ClickDetector
+--    (строго при конфете в руках); не ребёнок → жмём «Не замечать»
 -- 4) монстр (модель Monster) у окна (Window-части ≤12 стд) → клавиша F
 --    (VirtualInputManager); батарея Flashlight.Battery (макс 130), меньше
 --    40 — едем заряжаться на BatteryCrate.ClickDetector
@@ -4404,47 +4407,63 @@ local function hfFireplaceCF()
 end
 
 local function hfBowlObj() return hfFind("CandyBowl") end
+local function hfBagObj() return hfFind("FakeCandyBag") end
 local function hfHitboxObj()
     local d = hfFind("FrontDoor")
     return d and d:FindFirstChild("Hitbox")
 end
 local function hfCrateObj() return hfFind("BatteryCrate") end
 
--- поездка: ТП рядом (TweenService) → клик по ClickDetector → обратно
-local function hfTrip(getObj, key, tag)
+-- поездка по шагам: ТП рядом (TweenService) → клик по ClickDetector
+-- каждый шаг, в конце возврат на исходную точку.
+-- шаги = { { get=fn, key="HF...", tag="Имя" }, ... }
+local function hfTrip(steps)
     if hfBusy or pickupBusy or dupBusy then return false end
-    local obj = getObj()
-    if not obj then
-        print("[RM] авто-фарм: не нашёл " .. tag)
-        return false
-    end
     local ch = LP.Character
     local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
     if not hrp then return false end
+    local objs = {}
+    for _, s in ipairs(steps) do
+        local o = s.get()
+        if not o then
+            print("[RM] авто-фарм: не нашёл " .. s.tag)
+            return false
+        end
+        objs[#objs + 1] = o
+    end
     local origin = hrp.CFrame
     hfBusy = true
     local ok, err = pcall(function()
         G.RM_TP_Origin = { cf = origin, place = game.PlaceId }
-        local p = obj:GetPivot().Position
-        smoothTP(hrp, hfFloorCF(p + Vector3.new(0, 1, 0), p))
-        task.wait(0.35)
-        if typeof(fireclickdetector) ~= "function" then
-            error("нет fireclickdetector")
+        for i, s in ipairs(steps) do
+            local p = objs[i]:GetPivot().Position
+            smoothTP(hrp, hfFloorCF(p + Vector3.new(0, 1, 0), p))
+            task.wait(0.35)
+            if typeof(fireclickdetector) ~= "function" then
+                error("нет fireclickdetector")
+            end
+            local cd = objs[i]:FindFirstChild("ClickDetector")
+            if not cd then error("нет ClickDetector у " .. s.tag) end
+            if fireThrottle(s.key) then fireclickdetector(cd) end
+            task.wait(0.5)
         end
-        local cd = obj:FindFirstChild("ClickDetector")
-        if not cd then error("нет ClickDetector у " .. tag) end
-        if not fireThrottle(key) then return end
-        fireclickdetector(cd)
-        task.wait(0.5)
     end)
     pcall(function() smoothTP(hrp, origin) end)
     G.RM_TP_Origin = nil
     hfBusy = false
     if not ok then
-        print("[RM] авто-фарм (" .. tag .. "): " .. tostring(err))
+        print("[RM] авто-фарм: " .. tostring(err))
         return false
     end
     return true
+end
+
+-- «мешок → миска»: одна поездка, два клика, возврат к камину
+local function hfGrabCandy()
+    return hfTrip({
+        { get = hfBagObj, key = "HFBag", tag = "FakeCandyBag" },
+        { get = hfBowlObj, key = "HFBowl", tag = "CandyBowl" },
+    })
 end
 
 -- конфета в руках: наш флаг ИЛИ объект «candy» в персонаже/рюкзаке
@@ -4547,37 +4566,12 @@ local function hfAtWindow(now)
     return false
 end
 
--- меню ребёнка «Open / Unnoticed» → кликаем Open (EN и RU тексты)
-local function hfClickOpen(now)
-    if now - hfMenuAt < 1.5 then return false end
-    local pg = LP:FindFirstChild("PlayerGui")
-    if not pg then return false end
-    local target = nil
-    for _, o in ipairs(pg:GetDescendants()) do
-        local btn = nil
-        if o:IsA("TextButton") then
-            btn = o
-        elseif o:IsA("TextLabel") then
-            btn = o:FindFirstAncestorWhichIsA("TextButton")
-        end
-        if btn and not target then
-            local t = (btn.Text or ""):lower()
-            local isOpen = t:find("open", 1, true)
-                or t:find("открыт", 1, true)
-            local isOther = t:find("unnoticed", 1, true)
-                or t:find("не замечен", 1, true)
-                or t:find("ignore", 1, true)
-            if isOpen and not isOther and btn.Visible then
-                target = btn
-            end
-        end
-    end
-    if not target then return false end
-    hfMenuAt = now
+-- клик по кнопке меню (getconnections → фолбэк клик VirtualInputManager)
+local function hfClickBtn(btn)
     local clicked = false
     pcall(function()
         local cons = getconnections
-            and getconnections(target.MouseButton1Click)
+            and getconnections(btn.MouseButton1Click)
         if cons and cons[1] then
             cons[1]:Fire()
             clicked = true
@@ -4585,14 +4579,80 @@ local function hfClickOpen(now)
     end)
     if not clicked then
         pcall(function()
-            local pos = target.AbsolutePosition + target.AbsoluteSize / 2
+            local pos = btn.AbsolutePosition + btn.AbsoluteSize / 2
             game:GetService("VirtualInputManager"):SendMouseButtonEvent(
                 math.floor(pos.X), math.floor(pos.Y), 0, game, 1)
             clicked = true
         end)
     end
-    print("[RM] авто-фарм: меню → «Open» (" .. tostring(target.Text) .. ")")
     return clicked
+end
+
+-- кнопки меню стука в дверь: «Открыть» (open/открыт) и «Не замечать»
+-- (unnoticed / не замечен / ignore / pretend) — тексты EN и RU
+local function hfMenuBtns()
+    local res = { open = nil, no = nil }
+    local pg = LP:FindFirstChild("PlayerGui")
+    if not pg then return res end
+    for _, o in ipairs(pg:GetDescendants()) do
+        local btn = nil
+        if o:IsA("TextButton") then
+            btn = o
+        elseif o:IsA("TextLabel") then
+            btn = o:FindFirstAncestorWhichIsA("TextButton")
+        end
+        if btn and btn.Visible then
+            local t = (btn.Text or ""):lower()
+            if not res.open and (t:find("open", 1, true)
+                or t:find("открыт", 1, true)) then
+                res.open = btn
+            end
+            if not res.no and (t:find("unnoticed", 1, true)
+                or t:find("не замечен", 1, true)
+                or t:find("ignore", 1, true)
+                or t:find("pretend", 1, true)) then
+                res.no = btn
+            end
+        end
+    end
+    return res
+end
+
+-- ребёнок у двери: модель GhostChild/kid рядом с FrontDoor (≤25 стд) —
+-- тот же паттерн поиска, что у Kid Detector
+local function hfKidAtDoor()
+    local d = hfFind("FrontDoor")
+    if not d then return false end
+    local dp = d:GetPivot().Position
+    local found = false
+    pcall(function()
+        for _, o in ipairs(workspace:GetDescendants()) do
+            if not found and o:IsA("Model") then
+                local n = o.Name
+                if n == "GhostChild"
+                    or n:lower():find("kid", 1, true) then
+                    local okP, p = pcall(function()
+                        return o:GetPivot().Position
+                    end)
+                    if okP and (p - dp).Magnitude < 25 then
+                        found = true
+                    end
+                end
+            end
+        end
+    end)
+    return found
+end
+
+-- осмотр двери (раз в 5с, в консоль): кто там — ребёнок / монстр / пусто
+local function hfDoorWho()
+    local d = hfFind("FrontDoor")
+    if not d then return "нет двери" end
+    local dp = d:GetPivot().Position
+    if hfKidAtDoor() then return "ребёнок" end
+    local mp = hfMonsterPos()
+    if mp and (mp - dp).Magnitude < 25 then return "монстр" end
+    return "пусто"
 end
 
 MemoriesTab:CreateSection("Auto Farm (Хэллоуин)")
@@ -4605,11 +4665,12 @@ MemoriesTab:CreateToggle({
         hfGen = hfGen + 1
         local gen = hfGen
         if v then
-            notify("Auto Farm: ON — база у камина, конфеты → дверь, окно → F", 3)
+            notify("Auto Farm: ON — камин, мешок → миска, дверь (ребёнок → Open, чужой → Не замечать), окно → F", 3)
             task.spawn(function()
                 local candyHeld = false
                 local lastF = 0
                 local grantAt = 0
+                local doorLookAt = 0
                 while G.RM_HalloFarm and gen == hfGen do
                     if getgenv().RM_Run ~= RUN_ID then return end
                     if pickupBusy or dupBusy or hfBusy then
@@ -4632,30 +4693,60 @@ MemoriesTab:CreateToggle({
                             else
                                 notify("Auto Farm: батарея "
                                     .. math.floor(bat) .. " — заряжаюсь", 3)
-                                acted = hfTrip(hfCrateObj, "HFCrate",
-                                    "BatteryCrate")
+                                acted = hfTrip({ { get = hfCrateObj,
+                                    key = "HFCrate", tag = "BatteryCrate" } })
                             end
                         end
 
-                        -- 2) меню ребёнка → «Open»; после — раздача (20с)
-                        if not acted and hfClickOpen(now) then
-                            acted = true
-                            grantAt = now + 1.5
+                        -- 2) осмотр двери каждые 5с — консоль пишет, кто там
+                        if not acted and now - doorLookAt >= 5 then
+                            doorLookAt = now
+                            print("[RM] авто-фарм: у двери — " .. hfDoorWho())
                         end
 
-                        -- 3) раздача: конфета → Hitbox (строго при конфете)
+                        -- 3) меню стука: ребёнок → конфеты + «Открыть»;
+                        --    не ребёнок (монстр/пусто) → «Не замечать»
+                        if not acted and now - hfMenuAt >= 1.5 then
+                            local menu = hfMenuBtns()
+                            if menu.open or menu.no then
+                                hfMenuAt = now -- любая обработка меню раз в 1.5с
+                                local kid = hfKidAtDoor()
+                                if kid and menu.open then
+                                    if not (candyHeld or hfCandySeen()) then
+                                        acted = hfGrabCandy()
+                                        if acted then
+                                            candyHeld = true
+                                            print("[RM] авто-фарм: мешок → миска"
+                                                .. " → конфета (видна: "
+                                                .. tostring(hfCandySeen()) .. ")")
+                                        end
+                                    end
+                                    if not acted and hfClickBtn(menu.open) then
+                                        acted = true
+                                        grantAt = now + 1.5
+                                        print("[RM] авто-фарм: ребёнок → «Открыть»")
+                                    end
+                                elseif menu.no and not kid then
+                                    if hfClickBtn(menu.no) then
+                                        acted = true
+                                        print("[RM] авто-фарм: не ребёнок → «Не замечать»")
+                                    end
+                                end
+                                -- ребёнок без кнопки «Открыть» / чужой без
+                                -- кнопки «Не замечать» — ждём следующих тиков
+                            end
+                        end
+
+                        -- 4) раздача: конфета → Hitbox (строго при конфете)
                         if not acted and grantAt > 0 and now >= grantAt then
                             if now - grantAt > 18.5 then
                                 grantAt = 0 -- окно раздачи прошло
                             elseif not (candyHeld or hfCandySeen()) then
-                                acted = hfTrip(hfBowlObj, "HFBowl", "CandyBowl")
-                                if acted then
-                                    candyHeld = true
-                                    print("[RM] авто-фарм: миска → конфета (видна: "
-                                        .. tostring(hfCandySeen()) .. ")")
-                                end
+                                acted = hfGrabCandy()
+                                if acted then candyHeld = true end
                             else
-                                acted = hfTrip(hfHitboxObj, "HFDoor", "FrontDoor")
+                                acted = hfTrip({ { get = hfHitboxObj,
+                                    key = "HFDoor", tag = "FrontDoor" } })
                                 if acted then
                                     candyHeld = false
                                     grantAt = 0
@@ -4664,14 +4755,14 @@ MemoriesTab:CreateToggle({
                             end
                         end
 
-                        -- 4) держим конфету в запасе, пока не раздача
+                        -- 5) запас конфет: мешок → миска (пока не раздача)
                         if not acted and grantAt == 0
                             and not (candyHeld or hfCandySeen()) then
-                            acted = hfTrip(hfBowlObj, "HFBowl", "CandyBowl")
+                            acted = hfGrabCandy()
                             if acted then candyHeld = true end
                         end
 
-                        -- 5) база: дальше 6 стд от камина — возвращаемся
+                        -- 6) база: дальше 6 стд от камина — возвращаемся
                         if not acted then
                             local cf = hfFireplaceCF()
                             local ch = LP.Character
@@ -4705,6 +4796,7 @@ MemoriesTab:CreateButton({
         local d = hfFind("FrontDoor")
         local res = {
             mark(hfFind("Fireplace"), "камин"),
+            mark(hfFind("FakeCandyBag"), "мешок"),
             mark(hfFind("CandyBowl"), "миска"),
             mark(d and d:FindFirstChild("Hitbox"), "Hitbox двери"),
             mark(hfFind("BatteryCrate"), "зарядка"),
@@ -5596,4 +5688,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.34 rayfield loaded | v4.34: фикс кика Error 267 на Ночи 3 сразу после запуска — Anti-Kick больше НЕ удаляет Remotes.Kick (Destroy резал дерево; анти-чит Ночи 3 требует его наличие — отсюда 267 и старый Infinite yield WaitForChild(\"Kick\") из v4.24): теперь только getconnections:Disconnect на все OnClientEvent (клиентская кик-логика молчит, ремоут на месте), повтор на спавне сохранён, в консоль пишется число отключённых обработчиков | v4.33: Auto Farm (Хэллоуин, вкладка «Воспоминания»; тогл без флага — OFF на старте): база спереди камина (LivingRoomFurniture/Model/Fireplace, TweenService = общий smoothTP), конфеты CandyBowl.ClickDetector (слоты 1/2/3, хватает ~3 раза → клик-наполнение), меню ребёнка «Open» кликается само (getconnections → фолбэк VIM), раздача через FrontDoor.Hitbox.ClickDetector строго при конфете в руках (флаг + поиск candy), монстр у окна (Window-части ≤12 стд) → F через VirtualInputManager, батарея <40/130 → зарядка BatteryCrate; кнопка «Проверить объекты фарма» (✓/✗ пути) | v4.32: «Monster» из Воспоминаний подсвечивается ОДНИМ тоглом Monster ESP (вкладка ESP → Монстры) — один клик = и обычные монстры, и «Monster»; отдельный тогл из «Воспоминаний» убран | v4.31: ESP на монстра «Monster» из Воспоминаний — у модели нет Humanoid (только AnimationController, корень RootPart), раньше modelKind её отбрасывал: новый kind «memmonster» + тогл «ESP монстра (Monster)» во вкладке «Воспоминания» (цвет общий с Monster ESP), подпись «имя [дистанция]» без HP, RootPart-фолбэк позиции; камерный аим и «Под землю при опасности» теперь замечают и этого монстра (consider + RootPart) | v4.30: порт полезного из чужих скриптов (скан 14 репозиториев): «Запустить цели (радио)» — ТП к радио + клики до GameState.Active с возвратом на место (prolover), «Отключить метель» — GameState.Blizzard локально с откатом при re-run (prolover), «Бесплатные апгрейды (эксп.)» — RS.Upgrades.Generator Max/Price + показ UpgradeShop/Gambler, честный notify что сервер может не доверять клиенту (diddy), «Тревога двери» — опрос Growling на FrontDoor.SoundPart, кулдаун уведомлений 15с (gueston), «Анти-лаг (Potato)» — Plastic + ноль отражений + декали/текстуры + вода, кэш исходных значений в атрибутах RM_Pot*, восстановление при re-run и на OFF (prolover), WorkerHead (Ночь 3) в Item ESP — предмет без ClickDetector, гейт автозабора e.prompt or e.cd его не трогает (gueston), ТП «Сейфзона (воздух)» y=30 (gueston) | v4.29: убрана проверка на Residence Massacre (GameId/PlaceIds) — меню и скрипт открываются в ЛЮБОЙ игре (игровые фичи молчат, ТП-гейты от улета в пустоту защищают) | ФИКСЫ v4.28 (баг-хант 20 зон, 233 находки, отчёт BUGHUNT_v4.26.md): Под землю — кэш коллизий публикуется в getgenv (re-run возвращает коллизии + поднимает на поверхность), ручной OFF поднимает с глубины, Noclip↔Под-землю читают чужие кэши | автоэлектрика — состояние ящика = намерение клика, а не слепой toggle (flip-flop «шаг 2/шаг 3» убран), пересадка ящика одним рейсом | Паника-ТП — кулдаун 4с, труп не телепортируется, окно паники 15с (автофичи не стартуют, возвраты не откатывают из укрытия, мьютекс на время полёта), ТП-кнопки с force | smoothTP — новый твин отменяет предыдущий (два твина больше не дрались за CFrame) + таймаут ожидания (уничтоженный HRP больше не вешает поток) | «Заправить сейчас» через лимитер (анти-Error 267) | серия дюпа — лимитер на КАЖДОМ шаге, Revive блок при серии | hold-бинд аимбота — guard от зомби-цикла после re-run | Repair/Delivery — общий кулдаун на ремоут (8 кнопок не рвут соединение) | v4.27: сентинел пустого бинда Unknown → ButtonX — Roblox отдаёт input.KeyCode = Enum.KeyCode.Unknown на клики мыши/колесо/тап (DevForum 4073073; фильтр RF 3277) → v4.26 запускал ВСЕ 10 биндов на каждый клик; свип витрины только по TextBox «KeybindBox», санити старого конфига — 3 прохода (4.6/5.6/7.6с) против гонки с LoadConfiguration | v4.26: бинды «None» (под капотом тогда был Unknown — ошибки ввода убраны), автосанити + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.35 rayfield loaded | v4.35: Auto Farm по уточнённой механике юзера — цепочка конфет FakeCandyBag (мешок) → CandyBowl (миска) одной поездкой с двумя кликами (hfTrip теперь принимает шаги), на стук в дверь смотрим по ESP: ребёнок (GhostChild ≤25 стд от FrontDoor) → добираем конфеты и жмём «Открыть», иначе → «Не замечать» (тексты EN/RU), каждые 5с осмотр двери в консоль (ребёнок/монстр/пусто), раздача через Hitbox только при конфете, кнопка проверки показывает и мешок | v4.34: фикс кика Error 267 на Ночи 3 сразу после запуска — Anti-Kick больше НЕ удаляет Remotes.Kick (Destroy резал дерево; анти-чит Ночи 3 требует его наличие — отсюда 267 и старый Infinite yield WaitForChild(\"Kick\") из v4.24): теперь только getconnections:Disconnect на все OnClientEvent (клиентская кик-логика молчит, ремоут на месте), повтор на спавне сохранён, в консоль пишется число отключённых обработчиков | v4.33: Auto Farm (Хэллоуин, вкладка «Воспоминания»; тогл без флага — OFF на старте): база спереди камина (LivingRoomFurniture/Model/Fireplace, TweenService = общий smoothTP), конфеты CandyBowl.ClickDetector (слоты 1/2/3, хватает ~3 раза → клик-наполнение), меню ребёнка «Open» кликается само (getconnections → фолбэк VIM), раздача через FrontDoor.Hitbox.ClickDetector строго при конфете в руках (флаг + поиск candy), монстр у окна (Window-части ≤12 стд) → F через VirtualInputManager, батарея <40/130 → зарядка BatteryCrate; кнопка «Проверить объекты фарма» (✓/✗ пути) | v4.32: «Monster» из Воспоминаний подсвечивается ОДНИМ тоглом Monster ESP (вкладка ESP → Монстры) — один клик = и обычные монстры, и «Monster»; отдельный тогл из «Воспоминаний» убран | v4.31: ESP на монстра «Monster» из Воспоминаний — у модели нет Humanoid (только AnimationController, корень RootPart), раньше modelKind её отбрасывал: новый kind «memmonster» + тогл «ESP монстра (Monster)» во вкладке «Воспоминания» (цвет общий с Monster ESP), подпись «имя [дистанция]» без HP, RootPart-фолбэк позиции; камерный аим и «Под землю при опасности» теперь замечают и этого монстра (consider + RootPart) | v4.30: порт полезного из чужих скриптов (скан 14 репозиториев): «Запустить цели (радио)» — ТП к радио + клики до GameState.Active с возвратом на место (prolover), «Отключить метель» — GameState.Blizzard локально с откатом при re-run (prolover), «Бесплатные апгрейды (эксп.)» — RS.Upgrades.Generator Max/Price + показ UpgradeShop/Gambler, честный notify что сервер может не доверять клиенту (diddy), «Тревога двери» — опрос Growling на FrontDoor.SoundPart, кулдаун уведомлений 15с (gueston), «Анти-лаг (Potato)» — Plastic + ноль отражений + декали/текстуры + вода, кэш исходных значений в атрибутах RM_Pot*, восстановление при re-run и на OFF (prolover), WorkerHead (Ночь 3) в Item ESP — предмет без ClickDetector, гейт автозабора e.prompt or e.cd его не трогает (gueston), ТП «Сейфзона (воздух)» y=30 (gueston) | v4.29: убрана проверка на Residence Massacre (GameId/PlaceIds) — меню и скрипт открываются в ЛЮБОЙ игре (игровые фичи молчат, ТП-гейты от улета в пустоту защищают) | ФИКСЫ v4.28 (баг-хант 20 зон, 233 находки, отчёт BUGHUNT_v4.26.md): Под землю — кэш коллизий публикуется в getgenv (re-run возвращает коллизии + поднимает на поверхность), ручной OFF поднимает с глубины, Noclip↔Под-землю читают чужие кэши | автоэлектрика — состояние ящика = намерение клика, а не слепой toggle (flip-flop «шаг 2/шаг 3» убран), пересадка ящика одним рейсом | Паника-ТП — кулдаун 4с, труп не телепортируется, окно паники 15с (автофичи не стартуют, возвраты не откатывают из укрытия, мьютекс на время полёта), ТП-кнопки с force | smoothTP — новый твин отменяет предыдущий (два твина больше не дрались за CFrame) + таймаут ожидания (уничтоженный HRP больше не вешает поток) | «Заправить сейчас» через лимитер (анти-Error 267) | серия дюпа — лимитер на КАЖДОМ шаге, Revive блок при серии | hold-бинд аимбота — guard от зомби-цикла после re-run | Repair/Delivery — общий кулдаун на ремоут (8 кнопок не рвут соединение) | v4.27: сентинел пустого бинда Unknown → ButtonX — Roblox отдаёт input.KeyCode = Enum.KeyCode.Unknown на клики мыши/колесо/тап (DevForum 4073073; фильтр RF 3277) → v4.26 запускал ВСЕ 10 биндов на каждый клик; свип витрины только по TextBox «KeybindBox», санити старого конфига — 3 прохода (4.6/5.6/7.6с) против гонки с LoadConfiguration | v4.26: бинды «None» (под капотом тогда был Unknown — ошибки ввода убраны), автосанити + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
