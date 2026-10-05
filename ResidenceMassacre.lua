@@ -55,9 +55,26 @@ pcall(function()
     local oldLib = G.RM_RayfieldLib
     if oldLib and type(oldLib.Destroy) == "function" then
         oldLib:Destroy()
+        -- Destroy() НЕ отменяет task.delay(4, RayfieldLibrary.LoadConfiguration)
+        -- в исходнике Rayfield: таймер смотрит поля таблицы в момент вызова —
+        -- глушим их, иначе при re-run в первые 4с старая библиотека прогрузит
+        -- конфиг ПОСЛЕ старта нового прогона: колбэки старых элементов запишут
+        -- флаги в общий getgenv, а Toggle:Set откатит файл конфига старыми
+        -- значениями
+        oldLib.LoadConfiguration = function() end
+        oldLib.Flags = {}
     end
 end)
 G.RM_RayfieldLib = nil
+-- 1b) Подписки старого прогона на события (Auto Scare / Тревога кабины):
+-- они живут в локалах замыкания старого прогона и отписываются сами
+-- ТОЛЬКО при следующем событии (а события может и не быть) — гасим явно
+pcall(function()
+    local a, b = G.RM_ScareConn, G.RM_CabinConn
+    if typeof(a) == "RBXScriptConnection" then a:Disconnect() end
+    if typeof(b) == "RBXScriptConnection" then b:Disconnect() end
+end)
+G.RM_ScareConn, G.RM_CabinConn = nil, nil
 -- 2) Noclip переживал re-run молча: окно пересоздаётся «выкл»
 -- (G.RM_Noclip = false), а коллизии остаются выключенными —
 -- возвращаем по сохранённой таблице исходных значений
@@ -352,6 +369,9 @@ local CLIMB = 2.5 -- максимум подъёма за шаг: ступени
 
 local function moveKeys()
     local x, z = 0, 0
+    -- набор в чате / поиске Rayfield не должен двигать персонажа
+    -- (IsKeyDown не знает про gameProcessed — спрашиваем фокус сам)
+    if UIS:GetFocusedTextBox() then return 0, 0, 1 end
     if UIS:IsKeyDown(Enum.KeyCode.W) then z = z + 1 end
     if UIS:IsKeyDown(Enum.KeyCode.S) then z = z - 1 end
     if UIS:IsKeyDown(Enum.KeyCode.A) then x = x - 1 end
@@ -362,6 +382,18 @@ local function moveKeys()
 end
 
 local walkConn, walkWarnAt = nil, 0
+-- params рейкастов TP walk: раньше создавалось 2 штуки за кадр при
+-- движении — держим один, пересоздаём только при смене персонажа
+local walkParams, walkParamsCh = nil, nil
+local function walkParamsFor(ch)
+    if walkParamsCh ~= ch then
+        walkParams = RaycastParams.new()
+        walkParams.IgnoreWater = true
+        walkParams.FilterDescendantsInstances = { ch }
+        walkParamsCh = ch
+    end
+    return walkParams
+end
 walkConn = RunService.RenderStepped:Connect(function(dt)
     if getgenv().RM_Run ~= RUN_ID then
         if walkConn then walkConn:Disconnect() walkConn = nil end
@@ -402,9 +434,7 @@ walkConn = RunService.RenderStepped:Connect(function(dt)
         local stepLen = stepVec.Magnitude
         if stepLen > 0 then
             local rdir = stepVec.Unit
-            local params = RaycastParams.new()
-            params.FilterDescendantsInstances = {ch}
-            params.IgnoreWater = true
+            local params = walkParamsFor(ch)
             local feetY = hrp.Position.Y - (standOffset or 2)
             local rayLen = stepLen + 0.4
             local blockD = nil
@@ -462,9 +492,7 @@ walkConn = RunService.RenderStepped:Connect(function(dt)
         --  * подъём больше CLIMB (2.5 студ) не берём — дальше не прыгаем,
         --    вниз опускаем плавно, не более 5 студ за тик.
         do
-            local params = RaycastParams.new()
-            params.FilterDescendantsInstances = {ch}
-            params.IgnoreWater = true
+            local params = walkParamsFor(ch)
 
             -- эталон: сколько корпус реально стоит над землёй прямо сейчас
             local under = workspace:Raycast(hrp.Position, Vector3.new(0, -30, 0), params)
@@ -1163,7 +1191,9 @@ local function pickOptions()
     return opts
 end
 
+local lastItemScan = 0 -- момент последнего полного скана (дебаунс событий спавна)
 local function scanItems()
+    lastItemScan = os.clock()
     local seen = {}
     local interact = {} -- owner -> {cd=, prompt=}
     local newName = false
@@ -1273,10 +1303,14 @@ espAddConn = workspace.DescendantAdded:Connect(function(obj)
         if k and not espBy[obj] then espAdd(obj, k) end
     end
     -- появился ClickDetector/Prompt (предмет/канистра/генератор) —
-    -- сразу ресканим предметы, не ждём секундного скана
+    -- сразу ресканим предметы, не ждём секундного скана. Но дебаунс:
+    -- при массовом спавне (волнами) полный обход workspace за КАЖДЫЙ
+    -- объект давал микрофризы 5–20мс; секундный тик scanEsp всё доберёт
     if obj:IsA("ClickDetector") or obj:IsA("ProximityPrompt") then
         task.defer(function()
-            if getgenv().RM_Run == RUN_ID then pcall(scanItems) end
+            if getgenv().RM_Run ~= RUN_ID then return end
+            if os.clock() - lastItemScan < 0.5 then return end
+            pcall(scanItems)
         end)
     end
 end)
@@ -1702,6 +1736,7 @@ local cellGrabAt = -1e9 -- последний клик по капсуле (ок
 local cellTriedAt = -1e9 -- последняя попытка вставки (кулдаун попыток)
 local cellTries = 0   -- неудачных вставок подряд
 local cellWarned = false
+local cellGenShown = nil -- последний выбранный генератор (для отладки)
 
 -- позиция объекта (Model/BasePart; у Folder — первая деталь).
 -- НЕ брать Position у ClickDetector: у него нет такого свойства —
@@ -1715,13 +1750,65 @@ local function objPos(o)
     return h and h.Position or nil
 end
 
+-- генератор для ВСТАВКИ капсулы (Ночь 2): нужный слот —
+-- Generator.Detector.ClickDetector (детектор вставки, со скриншота юзера),
+-- а НЕ верхний ClickDetector модели. Моделей с "generator" в имени в
+-- workspace может быть несколько (деко/старая карта) — берём кандидата
+-- с Detector (ближайшего к игроку), без Detector — ближайший вообще.
+local function findCellGen()
+    local myPos = nil
+    pcall(function()
+        local hrp = LP.Character
+            and LP.Character:FindFirstChild("HumanoidRootPart")
+        myPos = hrp and hrp.Position
+    end)
+    local function pick(withDetector)
+        local b, bcd, bd = nil, nil, nil
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("Model")
+                and string.find(string.lower(d.Name), "generator", 1, true) then
+                local det = d:FindFirstChild("Detector")
+                local cd = det
+                    and det:FindFirstChildWhichIsA("ClickDetector", true)
+                if not withDetector then
+                    cd = cd or d:FindFirstChildWhichIsA("ClickDetector", true)
+                end
+                if cd then
+                    local pos = objPos(d)
+                    local dist = (myPos and pos)
+                        and (pos - myPos).Magnitude or 0
+                    if not b or dist < bd then
+                        b, bcd, bd = d, cd, dist
+                    end
+                end
+            end
+        end
+        return b, bcd
+    end
+    local g, cd = pick(true) -- слот вставки = Generator.Detector
+    if g then return g, cd end
+    return pick(false)       -- запасной путь: любой ClickDetector
+end
+
+-- капсула внутри ЛЮБОЙ модели-генератор (их в workspace может быть
+-- несколько) — такую не берём
+local function insideAnyGen(d)
+    local a = d:FindFirstAncestorWhichIsA("Model")
+    while a do
+        if string.find(string.lower(a.Name), "generator", 1, true) then
+            return true
+        end
+        a = a:FindFirstAncestorWhichIsA("Model")
+    end
+    return false
+end
+
 -- свободная капсула: Model «PowerCell» с ClickDetector, НЕ внутри Generator
 local function findLooseCell()
-    local gen = findByModelName("generator")
     for _, d in ipairs(workspace:GetDescendants()) do
         if d:IsA("Model")
             and string.find(string.lower(d.Name), "powercell", 1, true)
-            and not (gen and d:IsDescendantOf(gen)) then
+            and not insideAnyGen(d) then
             local cd = d:FindFirstChildWhichIsA("ClickDetector", true)
             if cd then return d, cd end
         end
@@ -1742,8 +1829,14 @@ task.spawn(function()
                         print("[RM] Ночь 2: капсула не вставилась 4 раза — авто остановлено. "
                             .. "Включи заново после разбора и скажи, как вставляется вручную")
                     end
-                    local gen, cdGen = findByModelName("generator")
+                    local gen, cdGen = findCellGen()
                     local cell, cdCell = findLooseCell()
+                    -- отладка: один раз на каждый новый выбор — в консоли
+                    -- видно, КАКОЙ генератор взят для вставки
+                    if gen and gen:GetFullName() ~= cellGenShown then
+                        cellGenShown = gen:GetFullName()
+                        print("[RM] Ночь 2: слот вставки → " .. cellGenShown)
+                    end
                     -- капсула встала (свободной не осталось) — снимаем
                     -- прошлые неудачи: иначе счётчик памятит старую аварию
                     -- и авто не стартует на следующей ночи
@@ -1783,7 +1876,10 @@ task.spawn(function()
                             -- в руках: клик впустую не должен жечь бюджет
                             local wasHeld = cell:IsDescendantOf(ch)
                             local okG, errG = pcall(function()
-                                local pressed = fuelPress(hrp, objPos(gen), cdGen)
+                                -- телепорт к СЛОТУ (Detector), а не к центру
+                                -- модели: кликаем именно детектор вставки
+                                local slot = objPos(cdGen.Parent) or objPos(gen)
+                                local pressed = fuelPress(hrp, slot, cdGen)
                                 cellTriedAt = os.clock()
                                 -- 4 попытки тратим только когда капсула
                                 -- реально в руках И клик прошёл
@@ -2179,18 +2275,25 @@ espDrawConn = RunService.RenderStepped:Connect(function()
                 pcall(function() e.gui:Destroy() end)
                 table.remove(espCache, i)
             else
+                -- позицию ищем ТОЛЬКО у включённых категорий: раньше
+                -- GetPivot/FindFirstChild считались каждый кадр и при
+                -- выключенном ESP (лишние вызовы + GC 40-80 строк/кадр)
+                local on = kindOn(e.kind)
                 local show = false
                 local pos = nil
-                if e.kind == "item" then
-                    local ok, piv = pcall(function() return inst:GetPivot().Position end)
-                    if ok then pos = piv end
-                else
-                    local root = inst:FindFirstChild("HumanoidRootPart")
-                        or inst:FindFirstChild("Head")
-                    if root then pos = root.Position end
+                if on then
+                    if e.kind == "item" then
+                        -- pcall(fn, obj) без замыкания — аллокации меньше
+                        local ok, cf = pcall(inst.GetPivot, inst)
+                        if ok and cf then pos = cf.Position end
+                    else
+                        local root = inst:FindFirstChild("HumanoidRootPart")
+                            or inst:FindFirstChild("Head")
+                        if root then pos = root.Position end
+                    end
                 end
                 local txt = nil
-                if kindOn(e.kind) and myHRP and pos then
+                if on and myHRP and pos then
                     local dist = (pos - myHRP.Position).Magnitude
                     local color = kindColor(e.kind)
                     if e.hl.FillColor ~= color then e.hl.FillColor = color end
@@ -2301,6 +2404,10 @@ local Window = Rayfield:CreateWindow({
     Theme = ELITE,
     ConfigurationSaving = { Enabled = true, FolderName = "RMScripts", FileName = "ResidenceMassacre" },
     KeySystem = false,
+    -- дефолтный хоткей Rayfield — K, а K у нас «Auto PowerCell»:
+    -- без своего ключа одно нажатие и прятало окно, и переключало фичу.
+    -- RightShift: строка-значение = имя KeyCode (валидация в CreateWindow)
+    ToggleUIKeybind = "RightShift",
 })
 
 -- ==== поиск окна Rayfield: CoreGui / gethui() / RobloxGui / PlayerGui ====
@@ -2542,7 +2649,7 @@ PlayerTab:CreateSlider({
 
 PlayerTab:CreateKeybind({
     Name = "Бинд Speed (TP walk)",
-    CurrentKeybind = "B",
+    CurrentKeybind = "None",
     Flag = "RM_BindSpeed",
     Callback = function()
         speedToggle:Set(not G.RM_TPSpeed)
@@ -2570,7 +2677,7 @@ stamToggle = PlayerTab:CreateToggle({
 
 PlayerTab:CreateKeybind({
     Name = "Бинд стамины",
-    CurrentKeybind = "N",
+    CurrentKeybind = "None",
     Flag = "RM_BindStam",
     Callback = function()
         stamToggle:Set(not G.RM_StaminaLock)
@@ -2589,7 +2696,7 @@ o2Toggle = PlayerTab:CreateToggle({
 })
 PlayerTab:CreateKeybind({
     Name = "Бинд Infinite O2",
-    CurrentKeybind = "V",
+    CurrentKeybind = "None",
     Flag = "RM_BindO2",
     Callback = function()
         o2Toggle:Set(not G.RM_InfO2)
@@ -2631,7 +2738,7 @@ freezeToggle = PlayerTab:CreateToggle({
 })
 PlayerTab:CreateKeybind({
     Name = "Бинд Anti-Freeze",
-    CurrentKeybind = "M",
+    CurrentKeybind = "None",
     Flag = "RM_BindFreeze",
     Callback = function()
         freezeToggle:Set(not G.RM_AntiFreeze)
@@ -2696,7 +2803,7 @@ noclipToggle = PlayerTab:CreateToggle({
 })
 PlayerTab:CreateKeybind({
     Name = "Бинд Noclip",
-    CurrentKeybind = "F",
+    CurrentKeybind = "None",
     Flag = "RM_BindNoclip",
     Callback = function()
         noclipToggle:Set(not G.RM_Noclip)
@@ -2834,6 +2941,9 @@ end
 task.spawn(function()
     task.wait(1) -- даём старому прогону выйти по RUN_ID (гонка со сканом)
     if getgenv().RM_Run ~= RUN_ID then return end
+    -- тогл успили включить за эту секунду — не мешаем новому скану
+    -- (restore включил бы только что погашенные помехи → мерцание)
+    if G.RM_NoStatic then return end
     staticRestore()
 end)
 local staticGen = 0
@@ -2862,14 +2972,21 @@ PlayerTab:CreateToggle({
                     -- Explorer, добавлю паттерн
                     local marked = false
                     pcall(function()
-                        local pg = LP:FindFirstChildOfClass("PlayerGui")
-                        if pg then
-                            for _, g in ipairs(pg:GetDescendants()) do
-                                if g:GetAttribute("RM_NoStatic") == true then
-                                    marked = true
-                                    break
+                        -- те же корни, что и в staticScan: он гасит помехи
+                        -- и в PlayerGui, и в CoreGui — иначе подсказка
+                        -- врала «не найдено» для overlay из CoreGui
+                        local roots = { LP:FindFirstChildOfClass("PlayerGui"),
+                            game:GetService("CoreGui") }
+                        for _, root in ipairs(roots) do
+                            if root then
+                                for _, g in ipairs(root:GetDescendants()) do
+                                    if g:GetAttribute("RM_NoStatic") == true then
+                                        marked = true
+                                        break
+                                    end
                                 end
                             end
+                            if marked then break end
                         end
                     end)
                     if not marked then
@@ -2920,7 +3037,7 @@ pickDD = PlayerTab:CreateDropdown({
 
 PlayerTab:CreateKeybind({
     Name = "Бинд Auto pickup",
-    CurrentKeybind = "H",
+    CurrentKeybind = "None",
     Flag = "RM_BindPick",
     Callback = function()
         pickToggle:Set(not G.RM_AutoPickup)
@@ -2950,7 +3067,7 @@ fuelToggle = Night1:CreateToggle({
 
 Night1:CreateKeybind({
     Name = "Бинд Auto fuel",
-    CurrentKeybind = "J",
+    CurrentKeybind = "None",
     Flag = "RM_BindFuel",
     Callback = function()
         fuelToggle:Set(not G.RM_AutoFuel)
@@ -3105,6 +3222,7 @@ Night1:CreateToggle({
                     notify("Ларри появился снаружи", 3)
                 end
             end)
+            G.RM_ScareConn = scareConn -- блок старта гасит его при re-run
             notify("Auto Scare ON (нужна установленная камера)", 3)
         else
             if scareConn then
@@ -3171,7 +3289,7 @@ cellToggle = Night2:CreateToggle({
 })
 Night2:CreateKeybind({
     Name = "Бинд PowerCell",
-    CurrentKeybind = "K",
+    CurrentKeybind = "None",
     Flag = "RM_BindCell",
     Callback = function()
         cellToggle:Set(not G.RM_AutoCell)
@@ -3254,7 +3372,7 @@ local Night3 = Window:CreateTab("Ночь 3", 4483362458)
 Night3:CreateSection("Аимбот")
 Night3:CreateKeybind({
     Name = "Бинд аимбота (зажать)",
-    CurrentKeybind = "C",
+    CurrentKeybind = "None",
     HoldToInteract = true,
     Flag = "RM_BindAim",
     Callback = function(on)
@@ -3262,8 +3380,11 @@ Night3:CreateKeybind({
     end,
 })
 
-Night3:CreateSection("Тревога кабины")
-Night3:CreateToggle({
+-- новая вкладка «Воспоминания»: детект ребёнка и тревога кабины
+-- переехали сюда из «Ночи 3» (по просьбе юзера)
+local MemoriesTab = Window:CreateTab("Воспоминания", 4483362458)
+MemoriesTab:CreateSection("Тревога кабины")
+MemoriesTab:CreateToggle({
     Name = "Кто-то лезет в кабину",
     CurrentValue = false,
     Callback = function(v)
@@ -3298,6 +3419,7 @@ Night3:CreateToggle({
                         notify("Вторжение в кабину: " .. who
                             .. " открывает «" .. what .. "»", 4)
                     end)
+                    G.RM_CabinConn = cabinConn -- блок старта гасит его при re-run
                     notify("Тревога кабины: ON", 3)
                 else
                     notify("Тревога кабины: RemoteEvent OpenDoor не найден", 3)
@@ -3309,9 +3431,9 @@ Night3:CreateToggle({
     end,
 })
 
-Night3:CreateSection("Kid Detector")
+MemoriesTab:CreateSection("Kid Detector")
 G.RM_KidDetect = false -- без флага: всегда стартует выключенным
-Night3:CreateToggle({
+MemoriesTab:CreateToggle({
     Name = "Детект ребёнка (GhostChild)",
     CurrentValue = false,
     Callback = function(v)
@@ -3817,7 +3939,7 @@ end
 
 TPTab:CreateKeybind({
     Name = "Бинд паники (случайное укрытие)",
-    CurrentKeybind = "G",
+    CurrentKeybind = "None",
     Flag = "RM_BindPanic",
     Callback = function() panicTP() end,
 })
@@ -4013,6 +4135,7 @@ SettingsTab:CreateDropdown({
     Callback = function(opt)
         local v = (typeof(opt) == "table") and opt[1] or opt
         if typeof(v) ~= "string" then v = "Как в игре" end -- пустой CurrentOption
+        local prev = G.RM_CamMode
         if v == "1-е лицо" then
             G.RM_CamMode = "first"
         elseif v == "3-е (сзади)" then
@@ -4021,7 +4144,12 @@ SettingsTab:CreateDropdown({
             G.RM_CamMode = "game"
         end
         applyCam()
-        notify("Камера: " .. tostring(v), 2)
+        -- LoadConfiguration зовёт Set и с НЕ изменившимся значением
+        -- (ссылки таблиц после JSONDecode не равны) — без этой проверки
+        -- каждое открытие дублировало бы «Камера: Как в игре»
+        if G.RM_CamMode ~= prev then
+            notify("Камера: " .. tostring(v), 2)
+        end
     end,
 })
 
@@ -4118,4 +4246,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.21 rayfield loaded | НОВОЕ: Anti-Kick всегда при старте (Destroy Remotes.Kick — клиентская сторона кика) + повтор на спавне, Бессмертие/God Mode (тогл в «Игрок»: HP-долив по HealthChanged + запрет состояния Dead, перевешивается при re-run) | РЕВИЗИЯ (ревью 2400-3783): RUN_ID после WaitForChild в Тревоге кабины, Anti-Freeze возвращает погашенный Temperature-скрипт после re-run (RM_TempScriptOff), noclip кеширует части раз в 0.5с (был GetDescendants каждый кадр), Disable Static не гасит собственное окно Rayfield, Kid Detector пишет ошибки скана в консоль, Паника честно пишет «ТП не удался» (ok от smoothTP), Камера без table: 0x... в notify, recolorGradient в дебаунсе темы | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.22 rayfield loaded | НОВОЕ: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
