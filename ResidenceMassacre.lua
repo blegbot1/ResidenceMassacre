@@ -1151,12 +1151,15 @@ local pickDD = nil -- выпадашка «Что забирать» (запол
 local function kindColor(kind)
     if kind == "player" then return G.RM_PlayerColor end
     if kind == "monster" then return G.RM_MonsterColor end
+    if kind == "memmonster" then return G.RM_MonsterColor end
     return G.RM_ItemColor
 end
 
 local function kindOn(kind)
     if kind == "player" then return G.RM_PlayerESP == true end
     if kind == "monster" then return G.RM_MonsterESP == true end
+    -- «Monster» из Воспоминаний: свой тогл во вкладке «Воспоминания»
+    if kind == "memmonster" then return G.RM_MemMonsterESP == true end
     return G.RM_ItemESP == true
 end
 
@@ -1169,6 +1172,9 @@ local function modelKind(m)
         if plr == LP then return nil end
         return "player"
     end
+    -- «Monster» (Воспоминания): модель монстра БЕЗ Humanoid — только
+    -- AnimationController, корень называется RootPart (v4.31, юзер-скрин)
+    if string.lower(m.Name) == "monster" then return "memmonster" end
     if not m:FindFirstChildOfClass("Humanoid") then return nil end
     -- мутанты/BunkerRat ведутся отдельной секцией выше — без двойного ESP
     if isMutantModel(m) then return nil end
@@ -2342,13 +2348,16 @@ local function aimTarget()
         if not model or not model.Parent then return end
         local root = model:FindFirstChild("HumanoidRootPart", true)
             or model:FindFirstChild("Head", true)
+            or model:FindFirstChild("RootPart", true)
         if root then
             local d = (root.Position - myPos).Magnitude
             if d < bestD then best, bestD = root, d end
         end
     end
     for _, e in ipairs(espCache) do
-        if e.kind == "monster" then consider(e.inst) end
+        if e.kind == "monster" or e.kind == "memmonster" then
+            consider(e.inst)
+        end
     end
     for _, e in ipairs(mutantCache) do
         consider(e.model)
@@ -2404,6 +2413,7 @@ espDrawConn = RunService.RenderStepped:Connect(function()
                     else
                         local root = inst:FindFirstChild("HumanoidRootPart")
                             or inst:FindFirstChild("Head")
+                            or inst:FindFirstChild("RootPart")
                         if root then pos = root.Position end
                     end
                 end
@@ -2415,6 +2425,9 @@ espDrawConn = RunService.RenderStepped:Connect(function()
                     if e.lbl.TextColor3 ~= color then e.lbl.TextColor3 = color end
                     if e.kind == "item" then
                         txt = ("%s [%dm]"):format(e.itemName or inst.Name, math.floor(dist))
+                    elseif e.kind == "memmonster" then
+                        -- у «Monster» нет Humanoid — HP не показываем
+                        txt = ("%s [%dm]"):format(inst.Name, math.floor(dist))
                     else
                         local hum = inst:FindFirstChildOfClass("Humanoid")
                         local hp = (hum and hum.Health > 0) and math.floor(hum.Health) or "?"
@@ -3068,13 +3081,16 @@ local function underNearest(fromPos)
         if not inst or not inst.Parent then return end
         local root = inst:FindFirstChild("HumanoidRootPart", true)
             or inst:FindFirstChild("Head", true)
+            or inst:FindFirstChild("RootPart", true)
         if root then
             local d = (root.Position - fromPos).Magnitude
             if not best or d < best then best = d end
         end
     end
     for _, e in ipairs(espCache) do
-        if e.kind == "monster" then consider(e.inst) end
+        if e.kind == "monster" or e.kind == "memmonster" then
+            consider(e.inst)
+        end
     end
     for _, e in ipairs(mutantCache) do consider(e.model) end
     return best
@@ -4309,6 +4325,20 @@ task.spawn(function()
     end
 end)
 
+-- «Monster» (Воспоминания): модель монстра без Humanoid (только
+-- AnimationController, корень RootPart) — раньше modelKind её отбрасывал.
+-- Кэш ESP заполняется всегда (scanEsp + DescendantAdded), тогл = видимость
+G.RM_MemMonsterESP = false -- без флага: всегда стартует выключенным
+MemoriesTab:CreateSection("ESP монстра")
+MemoriesTab:CreateToggle({
+    Name = "ESP монстра (Monster)",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_MemMonsterESP = v
+        notify("ESP монстра (Monster): " .. (v and "ON" or "OFF"), 2)
+    end,
+})
+
 -- ================= вкладка ТП: точки из RM Helper =================
 -- Координаты/имена объектов — из RM Helper (rawscripts). Летим
 -- плавно через общий smoothTP (не рывком, как у них).
@@ -5184,4 +5214,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.30 rayfield loaded | v4.30: порт полезного из чужих скриптов (скан 14 репозиториев): «Запустить цели (радио)» — ТП к радио + клики до GameState.Active с возвратом на место (prolover), «Отключить метель» — GameState.Blizzard локально с откатом при re-run (prolover), «Бесплатные апгрейды (эксп.)» — RS.Upgrades.Generator Max/Price + показ UpgradeShop/Gambler, честный notify что сервер может не доверять клиенту (diddy), «Тревога двери» — опрос Growling на FrontDoor.SoundPart, кулдаун уведомлений 15с (gueston), «Анти-лаг (Potato)» — Plastic + ноль отражений + декали/текстуры + вода, кэш исходных значений в атрибутах RM_Pot*, восстановление при re-run и на OFF (prolover), WorkerHead (Ночь 3) в Item ESP — предмет без ClickDetector, гейт автозабора e.prompt or e.cd его не трогает (gueston), ТП «Сейфзона (воздух)» y=30 (gueston) | v4.29: убрана проверка на Residence Massacre (GameId/PlaceIds) — меню и скрипт открываются в ЛЮБОЙ игре (игровые фичи молчат, ТП-гейты от улета в пустоту защищают) | ФИКСЫ v4.28 (баг-хант 20 зон, 233 находки, отчёт BUGHUNT_v4.26.md): Под землю — кэш коллизий публикуется в getgenv (re-run возвращает коллизии + поднимает на поверхность), ручной OFF поднимает с глубины, Noclip↔Под-землю читают чужие кэши | автоэлектрика — состояние ящика = намерение клика, а не слепой toggle (flip-flop «шаг 2/шаг 3» убран), пересадка ящика одним рейсом | Паника-ТП — кулдаун 4с, труп не телепортируется, окно паники 15с (автофичи не стартуют, возвраты не откатывают из укрытия, мьютекс на время полёта), ТП-кнопки с force | smoothTP — новый твин отменяет предыдущий (два твина больше не дрались за CFrame) + таймаут ожидания (уничтоженный HRP больше не вешает поток) | «Заправить сейчас» через лимитер (анти-Error 267) | серия дюпа — лимитер на КАЖДОМ шаге, Revive блок при серии | hold-бинд аимбота — guard от зомби-цикла после re-run | Repair/Delivery — общий кулдаун на ремоут (8 кнопок не рвут соединение) | v4.27: сентинел пустого бинда Unknown → ButtonX — Roblox отдаёт input.KeyCode = Enum.KeyCode.Unknown на клики мыши/колесо/тап (DevForum 4073073; фильтр RF 3277) → v4.26 запускал ВСЕ 10 биндов на каждый клик; свип витрины только по TextBox «KeybindBox», санити старого конфига — 3 прохода (4.6/5.6/7.6с) против гонки с LoadConfiguration | v4.26: бинды «None» (под капотом тогда был Unknown — ошибки ввода убраны), автосанити + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.31 rayfield loaded | v4.31: ESP на монстра «Monster» из Воспоминаний — у модели нет Humanoid (только AnimationController, корень RootPart), раньше modelKind её отбрасывал: новый kind «memmonster» + тогл «ESP монстра (Monster)» во вкладке «Воспоминания» (цвет общий с Monster ESP), подпись «имя [дистанция]» без HP, RootPart-фолбэк позиции; камерный аим и «Под землю при опасности» теперь замечают и этого монстра (consider + RootPart) | v4.30: порт полезного из чужих скриптов (скан 14 репозиториев): «Запустить цели (радио)» — ТП к радио + клики до GameState.Active с возвратом на место (prolover), «Отключить метель» — GameState.Blizzard локально с откатом при re-run (prolover), «Бесплатные апгрейды (эксп.)» — RS.Upgrades.Generator Max/Price + показ UpgradeShop/Gambler, честный notify что сервер может не доверять клиенту (diddy), «Тревога двери» — опрос Growling на FrontDoor.SoundPart, кулдаун уведомлений 15с (gueston), «Анти-лаг (Potato)» — Plastic + ноль отражений + декали/текстуры + вода, кэш исходных значений в атрибутах RM_Pot*, восстановление при re-run и на OFF (prolover), WorkerHead (Ночь 3) в Item ESP — предмет без ClickDetector, гейт автозабора e.prompt or e.cd его не трогает (gueston), ТП «Сейфзона (воздух)» y=30 (gueston) | v4.29: убрана проверка на Residence Massacre (GameId/PlaceIds) — меню и скрипт открываются в ЛЮБОЙ игре (игровые фичи молчат, ТП-гейты от улета в пустоту защищают) | ФИКСЫ v4.28 (баг-хант 20 зон, 233 находки, отчёт BUGHUNT_v4.26.md): Под землю — кэш коллизий публикуется в getgenv (re-run возвращает коллизии + поднимает на поверхность), ручной OFF поднимает с глубины, Noclip↔Под-землю читают чужие кэши | автоэлектрика — состояние ящика = намерение клика, а не слепой toggle (flip-flop «шаг 2/шаг 3» убран), пересадка ящика одним рейсом | Паника-ТП — кулдаун 4с, труп не телепортируется, окно паники 15с (автофичи не стартуют, возвраты не откатывают из укрытия, мьютекс на время полёта), ТП-кнопки с force | smoothTP — новый твин отменяет предыдущий (два твина больше не дрались за CFrame) + таймаут ожидания (уничтоженный HRP больше не вешает поток) | «Заправить сейчас» через лимитер (анти-Error 267) | серия дюпа — лимитер на КАЖДОМ шаге, Revive блок при серии | hold-бинд аимбота — guard от зомби-цикла после re-run | Repair/Delivery — общий кулдаун на ремоут (8 кнопок не рвут соединение) | v4.27: сентинел пустого бинда Unknown → ButtonX — Roblox отдаёт input.KeyCode = Enum.KeyCode.Unknown на клики мыши/колесо/тап (DevForum 4073073; фильтр RF 3277) → v4.26 запускал ВСЕ 10 биндов на каждый клик; свип витрины только по TextBox «KeybindBox», санити старого конфига — 3 прохода (4.6/5.6/7.6с) против гонки с LoadConfiguration | v4.26: бинды «None» (под капотом тогда был Unknown — ошибки ввода убраны), автосанити + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")

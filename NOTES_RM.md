@@ -66,6 +66,11 @@
 
 ### ESP / предметы
 - Любой `ClickDetector` / `ProximityPrompt` в workspace = предмет (Item ESP)
+- Модель `Monster` (Воспоминания, юзер-скрин v4.31): **без Humanoid** — только
+  `AnimationController`, корень `RootPart`, части Claw/Ribcage/Torso... 
+  `modelKind` ловит по точному имени → kind `memmonster`, тогл «ESP монстра
+  (Monster)» во вкладке «Воспоминания» (цвет общий с Monster ESP); 
+  `consider` (камерный аим, «Под землю») ищет корень с фолбэком `RootPart`
 - `WorkerHead` (Ночь 3) — часть/модель **без** ClickDetector: Item ESP метит
   по имени (v4.30, из gueston); автозабор его не трогает (гейт `e.prompt or e.cd`)
 - Топливо/газ: ValueBase с `"fuel"`/`"gas"` в имени → потом атрибут → потом текст
