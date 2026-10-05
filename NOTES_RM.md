@@ -87,22 +87,32 @@
 | ScriptBlox | **челлендж решён**: HMAC-SHA256(cookie=`ScR1ptBlx`, данные=`encodeURIComponent(UA)+time`) → cookie `__scriptblox_validation=?token...` + `__scriptblox_ua_`; API **`/api/script/<slug>`** отдаёт JSON с кодом; описания фич вытаскиваются с карточек. Коды большинства скриптов — под логином/обфусцированы |
 | pastefy / roscripts / MyzorithHub / Spirit Helper | только реклама или VM-обфускация — **брать нечего** |
 | rscripts.net | HTTP 403 |
-| youdontknow-creator/RMUH (GitHub, читаемый) | полный набор ТП: `Pumpkin_1..7.Spot`, `PressurePanels`, `WorkerHead`, `Shotgun`, `AmmoPiles`, `Haunted Mansion`, `Teddy bear`, `FakeCandyBag`, `workspace.FuseBox`, бункер-точки (y≈82), «SafeSpot», «Auto Memorie (Wip)»; табы Night 1/2/3, Spirit Helper, Mansion Incident. `kick.Name = ""` (переименование античит-ремоута) — **НЕ делаем** |
-| GitHubTestei/ResidenceMassacre (Rayfield, читаемый) | ТП-названия: O2 / power box / inside / downstairs closet / boards / radio; «Monster ESP (fixed) notification»; CF `-80,4,-134`, `-5,4,-98`, `-40,23,-68` |
-| frank590-star (Night 1, читаемый) | `Teleport_Locations = {Shack=(-79,4.5,-129), FuseBox=(-1,4.5,-92.5), Entrance=(-11.5,4.6,-24.2)}`, `workspace.Mutant.Spy`, `Asphyxia`, `HotChocolate` |
+| youdontknow-creator/RMUH (GitHub, читаемый) → **перенесено v4.19** | ТП: `PressurePanels`, `Pumpkin_1..7.Spot` (случайная тыква), `WorkerHead`, `AmmoPiles`, `HauntedMansion`, `FakeCandyBag`, `SafeSpot`; табы Night 1/2/3, Spirit Helper, Mansion Incident. Пропущено: `kick.Name = ""` (античит — красная линия), бункер-точки y≈82 (не знаю карту — в пустоту не летим), `FuseBox:FireServer(fios…`, «Auto Memorie (Wip)» |
+| GitHubTestei/ResidenceMassacre (Rayfield, читаемый) → **частично v4.19** | добавлена точка «Второй этаж (доски)» `(-40,23,-68)`; остальные 3 CF `(-80,4,-134)/(-5,4,-98)` — дубли наших Shack/Power; названия кнопок (TP O2/power box/radio) без координат — пропущены |
+| frank590-star (Night 1, читаемый) → **перенесено v4.19** | `Shack=(-79,4.5,-129)`, `FuseBox=(-1,4.5,-92.5)` — кнопки ТП; `Entrance≈наша (дубль)`; `workspace.Mutant.Spy/Asphyxia/HotChocolate` — не проверено, не трогал |
 | TheGuestON / Pixeluted (GitHub) | ТП-точки (`FrontDoor/SoundPart/Growling`, ген `-79.725,4.675,-132.755`); Pixeluted старый (2023), содержит обходы (adonis/hookmetamethod) — только структуры |
-| ScriptBlox-снippets выдачи | 241706: auto-wire, Larry spawn notifier; 55878: **kid detector**, remove danger, inf Sprint; 61029: esp abomination (Barry), esp gen/jerrycan, tp safeplace |
+| ScriptBlox-снippets выдачи → **частично v4.19** | 55878: **kid detector** — СДЕЛАН (тогл в Ночь 3); 241706 auto-wire/Larry notifier — наш auto electric покрывает, notifier не делал; 61029 esp abomination — покрыто расширением Mutant ESP |
 | GitHub-скан (2026-10, новый проход) | новых работающих raw/gist/pastefy с кодом СВЕРХ известных не найдено; обф подтверждён: ApexScript0x/RM (MoonVeil 242КБ), manfac9000 (таблица `\068\066…`), flopa2677 (MoonSec); TheGuestON-лоадер → pastebin `PTg2vat8` = 404 |
 
 ## Известные несделанное (осознанно)
 
-1. **`pickupBusy` без владельца** — токен-владелец не введён: watchdog (30с)
-   покрывает залипание, а смена владельца требует правки всех ~8 точек захвата.
+1. **`pickupBusy` без владельца** — токен-владелец не введён (ревью v4.19 снова
+   подсветило: watchdog после сброса не помнит, что поток «старый» — редкая
+   гонка на двойной телепорт). Лечится только правкой всех ~10 точек захвата
+   (`local tok = busyOn()/busyOff(tok)`) — отложено, watchdog (30с) покрывает.
 2. **Сброс пикеров темы** кнопкой «Сбросить тему» — цвета в пикерах GUI остаются
    старыми (косметика; риск сломать рабочую тему).
 3. **Fort Blox**: Kill All / No Spread / Auto Pickup — ждут запроса
    (`EliteHub-FortBlox`: есть `HitRemote`/`ShootRemote`/Killfeed, аимбот).
 4. Мелкий мёртвый код (присваивания-пустышки) — не чистил нарочно.
+5. **Кэширование обходов workspace** (авто-заправка ~4 обхода/0.5с, тик
+   электрики 2–3 обхода) — перф-замечания обоих ревью, отложено: рискованно
+   ломать рабочие поиски ради скорости.
+6. **Disable Static**: имена реальных оверлеев помех неизвестны — если паттерны
+   static/noise/vhs/glitch ничего не найдут, скрипт попросит имя из Explorer.
+7. **Кик `Remotes.Kick`** — юзер просил `:Destroy()` «для спокойствия»;
+   отказано (античит, красная линия) + технически бессмысленно (сервер держит
+   свою ссылку).
 
 ## Правки-паттерны (повторять)
 

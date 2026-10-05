@@ -125,6 +125,27 @@ local function smoothTP(hrp, cf, dur)
     return okDone
 end
 
+-- re-run посреди автозабора: старый прогон оборвался между телепортом
+-- к предмету и возвратом — персонаж бросило у предмета. Новый прогон
+-- откатывает на сохранённую точку (один раз, своя плейс-карта).
+task.spawn(function()
+    local saved = G.RM_TP_Origin
+    if type(saved) ~= "table" or type(saved.cf) ~= "CFrame"
+        or saved.place ~= game.PlaceId then
+        G.RM_TP_Origin = nil
+        return
+    end
+    G.RM_TP_Origin = nil
+    pcall(function()
+        local ch = LP.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        if hrp then
+            task.wait(1) -- даём новому прогону поднять GUI
+            smoothTP(hrp, saved.cf)
+        end
+    end)
+end)
+
 -- оригинальные значения освещения, снятые при ПЕРВОМ запуске:
 -- выключение fullbright/no-fog должно ВОЗВРАЩАТЬ темноту.
 -- Снимок живёт в getgenv(): при re-run старый прогон мог уже
@@ -546,6 +567,9 @@ task.spawn(function()
                 if stamRef and (not stamRef.v or stamRef.v.Parent == nil) then stamRef = nil end
                 if not stamRef then
                     local r = discoverStaminaOnce()
+                    -- там 1.2с yield: после re-run мёртвый прогон
+                    -- не пишет в чужую стамину
+                    if getgenv().RM_Run ~= RUN_ID then return end
                     if r then
                         stamRef = r
                     elseif not stamNoteOnce then
@@ -709,8 +733,13 @@ local mutantCache = {} -- array {model, hl, gui, lbl}
 local inCache = {}     -- model -> true
 
 local function isMutantModel(m)
-    return typeof(m) == "Instance" and m:IsA("Model")
-        and string.find(string.lower(m.Name), "mutant", 1, true) ~= nil
+    if typeof(m) ~= "Instance" or not m:IsA("Model") then return false end
+    local n = string.lower(m.Name)
+    -- BunkerRat из бункера = Abomination (Bunker Helper V5): тоже носит
+    -- Config и должен светиться в ESP мутанта, а не в «монстрах»
+    return string.find(n, "mutant", 1, true) ~= nil
+        or string.find(n, "abomination", 1, true) ~= nil
+        or string.find(n, "bunkerrat", 1, true) ~= nil
 end
 
 local function addMutant(m)
@@ -793,13 +822,22 @@ pcall(function()
         if isMutantModel(d) then addMutant(d) end
     end
 end)
--- спавн/десавн — события для быстрой реакции
-workspace.DescendantAdded:Connect(function(obj)
-    if getgenv().RM_Run ~= RUN_ID then return end
+-- спавн/десавн — события для быстрой реакции.
+-- При re-run старый прогон ОТКЛЮЧАЕТСЯ сам: иначе каждый перезапуск
+-- оставлял бы ещё по паре обработчиков с мёртвыми кэшами (утечка)
+local mutAddConn, mutRemConn
+mutAddConn = workspace.DescendantAdded:Connect(function(obj)
+    if getgenv().RM_Run ~= RUN_ID then
+        if mutAddConn then mutAddConn:Disconnect() mutAddConn = nil end
+        return
+    end
     if isMutantModel(obj) then addMutant(obj) end
 end)
-workspace.DescendantRemoving:Connect(function(obj)
-    if getgenv().RM_Run ~= RUN_ID then return end
+mutRemConn = workspace.DescendantRemoving:Connect(function(obj)
+    if getgenv().RM_Run ~= RUN_ID then
+        if mutRemConn then mutRemConn:Disconnect() mutRemConn = nil end
+        return
+    end
     if inCache[obj] then removeMutant(obj) end
 end)
 -- ПОСТОЯННЫЙ скан: ловит переименования и спавны, которые
@@ -824,6 +862,13 @@ task.spawn(function()
                     print("[RM] Мутант: ПРЕСЛЕДУЕТ кого-то (Chasing)")
                 end
                 e.chasing = chasing
+                -- состояние для метки (DОГОНЯЕТ/ИЩЕТ) считаем тут, раз в
+                -- секунду, — кадровый рендер просто читает e.state/e.danger
+                if mm and mm.Parent then
+                    local st, danger = mutantState(mm)
+                    e.state = st
+                    e.danger = danger
+                end
             end
         end)
         task.wait(1)
@@ -864,11 +909,17 @@ mutantDrawConn = RunService.RenderStepped:Connect(function()
                         local dist = (root.Position - myHRP.Position).Magnitude
                         local hum = m:FindFirstChildOfClass("Humanoid")
                         local hp = (hum and hum.Health > 0) and math.floor(hum.Health) or "?"
-                        local st, danger = mutantState(m)
-                        e.lbl.Text = ("MUTANT [%dm] HP %s%s")
-                            :format(math.floor(dist), tostring(hp), st)
+                        -- состояние/опасность считает 1-сек скан (e.state):
+                        -- глубокий FindFirstChild("Config") каждый кадр — перф
+                        local txt = ("MUTANT [%dm] HP %s%s")
+                            :format(math.floor(dist), tostring(hp),
+                                e.state or "")
+                        if e.lblTxt ~= txt then
+                            e.lblTxt = txt
+                            e.lbl.Text = txt
+                        end
                         -- красным при погоне, иначе — обычный цвет ESP
-                        local col = danger and Color3.fromRGB(255, 60, 60)
+                        local col = e.danger and Color3.fromRGB(255, 60, 60)
                             or G.RM_MutantColor
                         if e.lbl.TextColor3 ~= col then
                             e.lbl.TextColor3 = col
@@ -877,8 +928,8 @@ mutantDrawConn = RunService.RenderStepped:Connect(function()
                         show = true
                     end
                 end
-                e.hl.Enabled = show
-                e.gui.Enabled = show
+                if e.hl.Enabled ~= show then e.hl.Enabled = show end
+                if e.gui.Enabled ~= show then e.gui.Enabled = show end
             end
         end
     end)
@@ -924,7 +975,8 @@ local function modelKind(m)
         return "player"
     end
     if not m:FindFirstChildOfClass("Humanoid") then return nil end
-    if string.find(string.lower(m.Name), "mutant", 1, true) then return nil end
+    -- мутанты/BunkerRat ведутся отдельной секцией выше — без двойного ESP
+    if isMutantModel(m) then return nil end
     return "monster"
 end
 
@@ -1057,9 +1109,11 @@ local function scanItems()
         end
     end
     -- зарегистрировать/обновить найденные предметы
+    local seenNames = {}
     for owner, it in pairs(interact) do
         local nm = displayName(owner)
         local key = string.lower(nm)
+        seenNames[key] = true
         if not itemNames[key] then
             itemNames[key] = nm
             newName = true
@@ -1082,8 +1136,17 @@ local function scanItems()
     for _, inst in ipairs(gone) do
         espRemove(inst)
     end
-    -- в выпадашке появились новые имена предметов
-    if newName and pickDD and type(pickDD.Refresh) == "function" then
+    -- имена предметов, которых больше нет в мире, убираем из списка:
+    -- выпадашка «Что собирать» засорялась старья после респавна
+    local nameGone = false
+    for key in pairs(itemNames) do
+        if not seenNames[key] then
+            itemNames[key] = nil
+            nameGone = true
+        end
+    end
+    -- в выпадашке появились новые или ушли предметы — обновляем
+    if (newName or nameGone) and pickDD and type(pickDD.Refresh) == "function" then
         pcall(function() pickDD:Refresh(pickOptions()) end)
     end
 end
@@ -1120,9 +1183,14 @@ local function scanEsp()
     scanItems()
 end
 
--- спавн/десавн — быстрая реакция (без ожидания секундного скана)
-workspace.DescendantAdded:Connect(function(obj)
-    if getgenv().RM_Run ~= RUN_ID then return end
+-- спавн/десавн — быстрая реакция (без ожидания секундного скана).
+-- self-disconnect при re-run — как у mutant-событий выше (утечка)
+local espAddConn, espRemConn
+espAddConn = workspace.DescendantAdded:Connect(function(obj)
+    if getgenv().RM_Run ~= RUN_ID then
+        if espAddConn then espAddConn:Disconnect() espAddConn = nil end
+        return
+    end
     if obj:IsA("Model") then
         local k = modelKind(obj)
         if k and not espBy[obj] then espAdd(obj, k) end
@@ -1135,8 +1203,11 @@ workspace.DescendantAdded:Connect(function(obj)
         end)
     end
 end)
-workspace.DescendantRemoving:Connect(function(obj)
-    if getgenv().RM_Run ~= RUN_ID then return end
+espRemConn = workspace.DescendantRemoving:Connect(function(obj)
+    if getgenv().RM_Run ~= RUN_ID then
+        if espRemConn then espRemConn:Disconnect() espRemConn = nil end
+        return
+    end
     if espBy[obj] then espRemove(obj) end
 end)
 
@@ -1156,7 +1227,11 @@ local fireWarned = false
 local function fireItem(e)
     local fired = false
     if e.prompt then
-        pcall(function() e.prompt.HoldDuration = 0 end)
+        -- запись в replicated-свойство только при отличии: постоянный
+        -- одинаковый сет = десинк/кик Error 267
+        if e.prompt.HoldDuration ~= 0 then
+            pcall(function() e.prompt.HoldDuration = 0 end)
+        end
         if typeof(fireproximityprompt) == "function" then
             pcall(function() fireproximityprompt(e.prompt) end)
             fired = true
@@ -1233,14 +1308,27 @@ local function doPickup(e)
     -- после каждого yield — проверка re-run: старый прогон не кликает
     -- и не телепортирует (его pickupBusy — свой upvalue, новый он не трогает)
     if getgenv().RM_Run ~= RUN_ID then return end
+    -- телепортнулись: запоминаем точку возврата в getgenv — новый прогон
+    -- (re-run посреди автозабора) откатит персонажа туда сам
+    if teleported then
+        G.RM_TP_Origin = { cf = origin, place = game.PlaceId }
+    end
     if teleported then task.wait(0.1) end -- позиция успевает дойти до сервера
     if getgenv().RM_Run ~= RUN_ID then return end
     pcall(function() fireItem(e) end)
     e.clickAt = os.clock() -- кулдаун по каждой цели — из слайдера «Скорость действий»
+    -- цель не исчезла после клика (залипшая дверь/Prompt) — через 2.5с
+    -- ставим длинный кулдаун, иначе телепорт-пинг-понг каждые ~0.5с
+    task.delay(2.5, function()
+        if getgenv().RM_Run == RUN_ID and e.inst and e.inst.Parent then
+            e.clickAt = os.clock() + 10
+        end
+    end)
     if teleported then
         task.wait(0.05)
         if getgenv().RM_Run ~= RUN_ID then return end
         pcall(function() smoothTP(hrp, origin) end)
+        G.RM_TP_Origin = nil
     end
     task.wait(0.1)
     pickupBusy = false
@@ -1310,6 +1398,7 @@ end)
 -- Для сервера мы всё время стоим рядом с тем, что жмём.
 G.RM_AutoFuel = false -- без флага: всегда стартует выключенным
 local lastCanAt = -1e9  -- «нулевой» 0 врёт при маленьком os.clock(): берём −∞
+local lastFuelAt = -1e9 -- общий кулдаун цикла авто-заправки (анти-пинг-понг)
 local fuelWarned = false
 local fuelLvlWarned = false -- предупреждение «значение топлива не найдено»
 
@@ -1338,10 +1427,14 @@ local function fuelPress(hrp, pos, cd)
                 * (hrp.CFrame - hrp.CFrame.Position))
         end)
         task.wait(0.1) -- позиция успевает дойти до сервера
+        -- после yield мёртвый прогон (re-run) не кликает
+        if getgenv().RM_Run ~= RUN_ID then return false end
     end
     if typeof(fireclickdetector) == "function" then
-        pcall(function() fireclickdetector(cd) end)
-        return true
+        -- клик засчитываем только если он реально прошёл: иначе
+        -- lastCanAt сбрасывается вхолостую и проверка «нет
+        -- fireclickdetector» никогда не срабатывает
+        return pcall(function() fireclickdetector(cd) end)
     end
     if not fuelWarned then
         fuelWarned = true
@@ -1424,7 +1517,12 @@ task.spawn(function()
                     -- брать канистру есть смысл только при наличии генератора
                     local wantCan = lowFuel and (cdCan ~= nil) and (not held) and (cdGen ~= nil)
                     local wantGen = lowFuel and (cdGen ~= nil) and (held or tookRecently)
-                    if wantCan or wantGen then
+                    -- общий кулдаун ≥3с между нажатиями: без него
+                    -- (канистра «в руках» или порог не читается) клик+телепорт
+                    -- каждые 0.5с = Error 267 (топливный пинг-понг)
+                    if (wantCan or wantGen)
+                        and os.clock() - lastFuelAt >= 3 then
+                        lastFuelAt = os.clock()
                         pickupBusy = true
                         local origin = hrp.CFrame
                         -- тело в pcall: ошибка (респавн/исчезнувший объект
@@ -1437,12 +1535,15 @@ task.spawn(function()
                                 pressedCan = fuelPress(hrp, can:GetPivot().Position, cdCan)
                                 if pressedCan then lastCanAt = os.clock() end
                                 task.wait(tonumber(G.RM_ActionDelay) or 0.1) -- кулдаун канистры
+                                -- после yield мёртвый прогон не продолжает
+                                if getgenv().RM_Run ~= RUN_ID then return end
                             end
                             local canReady = pressedCan or held
                                 or ((os.clock() - lastCanAt) < 15)
                             if G.RM_AutoFuel and cdGen and canReady then
                                 fuelPress(hrp, gen:GetPivot().Position, cdGen)
                                 task.wait(tonumber(G.RM_ActionDelay) or 0.1) -- кулдаун подачи топлива
+                                if getgenv().RM_Run ~= RUN_ID then return end
                             end
                         end)
                         -- возвращаемся всегда, даже после ошибки
@@ -1469,6 +1570,7 @@ local function fuelManual()
         if getgenv().RM_Run ~= RUN_ID then return end
         pickupBusy = true
         local hrp, origin = nil, nil
+        local done = false -- дошёл ли до конца (return из pcall = ok=true!)
         local ok, err = pcall(function()
             local ch = LP.Character
             hrp = ch and ch:FindFirstChild("HumanoidRootPart")
@@ -1492,14 +1594,19 @@ local function fuelManual()
                 error("нет fireclickdetector у генератора")
             end
             task.wait(delay)
+            done = true
         end)
         -- возвращаемся всегда, даже после ошибки
         if hrp and origin then
             pcall(function() smoothTP(hrp, origin) end)
         end
         pickupBusy = false
-        if ok then
+        if ok and done then
             print("[RM] Заправка: канистра → генератор ✓")
+        elseif ok then
+            -- return внутри pcall (перезапуск скрипта) даёт ok=true:
+            -- не врём «✓», когда цикл не закрылся
+            print("[RM] Ручная заправка прервана — скрипт перезапустили")
         else
             print("[RM] Ручная заправка не удалась: " .. tostring(err))
         end
@@ -1560,6 +1667,13 @@ task.spawn(function()
                     end
                     local gen, cdGen = findByModelName("generator")
                     local cell, cdCell = findLooseCell()
+                    -- капсула встала (свободной не осталось) — снимаем
+                    -- прошлые неудачи: иначе счётчик памятит старую аварию
+                    -- и авто не стартует на следующей ночи
+                    if not cell and cellTries > 0 then
+                        cellTries = 0
+                        cellWarned = false
+                    end
                     if cell and cdCell and gen and cdGen and cellTries < 4 then
                         local now = os.clock()
                         local held = cell:IsDescendantOf(ch)
@@ -1588,10 +1702,17 @@ task.spawn(function()
                         elseif wantPut then
                             pickupBusy = true
                             local origin = hrp.CFrame
+                            -- капсула может быть «в окне доставки», но не
+                            -- в руках: клик впустую не должен жечь бюджет
+                            local wasHeld = cell:IsDescendantOf(ch)
                             local okG, errG = pcall(function()
-                                fuelPress(hrp, objPos(gen), cdGen)
+                                local pressed = fuelPress(hrp, objPos(gen), cdGen)
                                 cellTriedAt = os.clock()
-                                cellTries = cellTries + 1
+                                -- 4 попытки тратим только когда капсула
+                                -- реально в руках И клик прошёл
+                                if wasHeld and pressed then
+                                    cellTries = cellTries + 1
+                                end
                                 task.wait(delay)
                             end)
                             pcall(function() smoothTP(hrp, origin) end)
@@ -1715,6 +1836,9 @@ local function elecTP(hrp, worldPos, height)
     smoothTP(hrp, CFrame.new(worldPos + Vector3.new(0, height or 2, 0))
         * (hrp.CFrame - hrp.CFrame.Position))
     task.wait(0.1)
+    -- после yield: мёртвый прогон (re-run) не шлёт клики/FireServer —
+    -- вызывающие обязаны проверить возврат (см. guard'ы ниже)
+    if getgenv().RM_Run ~= RUN_ID then return end
 end
 
 local function elecClickBox(hrp, origin)
@@ -1724,6 +1848,8 @@ local function elecClickBox(hrp, origin)
     local okB, errB = pcall(function()
         local pos = objPos(box)
         if pos then elecTP(hrp, pos, 2) end
+        -- re-run во время полёта: старый прогон не щёлкает ящиком
+        if getgenv().RM_Run ~= RUN_ID then return end
         -- toggle засчитываем только при реальном клике
         if pcall(function() fireclickdetector(bcd) end) then
             fuseOpened = not fuseOpened
@@ -1821,6 +1947,7 @@ task.spawn(function()
                             local okW, errW = pcall(function()
                                 local pos = objPos(giver)
                                 if pos then elecTP(hrp, pos, 3) end
+                                if getgenv().RM_Run ~= RUN_ID then return end
                                 pcall(function() fireclickdetector(gcd) end)
                                 task.wait(0.6) -- выдача инструмента
                             end)
@@ -1867,6 +1994,9 @@ task.spawn(function()
                                     end
                                     local pos = objPos(w.model)
                                     if pos then elecTP(hrp, pos, 2) end
+                                    -- re-run во время полёта: сервер-действия
+                                    -- старого прогона (FireServer/клик) — стоп
+                                    if getgenv().RM_Run ~= RUN_ID then return end
                                     -- сначала ремоут ClickWire (проверенный
                                     -- путь RMxploitt), без него — ClickDetector
                                     local cr = nil
@@ -1982,22 +2112,29 @@ espDrawConn = RunService.RenderStepped:Connect(function()
                         or inst:FindFirstChild("Head")
                     if root then pos = root.Position end
                 end
+                local txt = nil
                 if kindOn(e.kind) and myHRP and pos then
                     local dist = (pos - myHRP.Position).Magnitude
                     local color = kindColor(e.kind)
                     if e.hl.FillColor ~= color then e.hl.FillColor = color end
                     if e.lbl.TextColor3 ~= color then e.lbl.TextColor3 = color end
                     if e.kind == "item" then
-                        e.lbl.Text = ("%s [%dm]"):format(e.itemName or inst.Name, math.floor(dist))
+                        txt = ("%s [%dm]"):format(e.itemName or inst.Name, math.floor(dist))
                     else
                         local hum = inst:FindFirstChildOfClass("Humanoid")
                         local hp = (hum and hum.Health > 0) and math.floor(hum.Health) or "?"
-                        e.lbl.Text = ("%s [%dm] HP %s"):format(inst.Name, math.floor(dist), tostring(hp))
+                        txt = ("%s [%dm] HP %s"):format(inst.Name, math.floor(dist), tostring(hp))
                     end
                     show = true
                 end
-                e.hl.Enabled = show
-                e.gui.Enabled = show
+                -- строки/Enabled не переписываем каждый кадр (GC + layout):
+                -- только при реальном изменении
+                if txt and e.lblTxt ~= txt then
+                    e.lblTxt = txt
+                    e.lbl.Text = txt
+                end
+                if e.hl.Enabled ~= show then e.hl.Enabled = show end
+                if e.gui.Enabled ~= show then e.gui.Enabled = show end
             end
         end
     end)
@@ -2020,6 +2157,9 @@ for _, u in ipairs(rayUrls) do
 end
 if not Rayfield then
     warn("[RM] Rayfield не загрузился — проверь интернет/экзекутор (httpget должен быть разрешён)")
+    -- бинд аимбота уже повешен выше — снимаем, ранний выход не должен
+    -- оставлять висеть чужой RenderStep до перезапуска
+    pcall(function() RunService:UnbindFromRenderStep("RMAimMonster") end)
     return
 end
 
@@ -2476,6 +2616,104 @@ PlayerTab:CreateButton({
     end,
 })
 
+-- ===== Disable Static: глушение помех (паттерн Fullbright) =====
+-- Ищем оверлеи помех (static/noise/vhs/glitch) в PlayerGui/CoreGui,
+-- гасим Enabled и помечаем атрибутом RM_NoStatic (переживает re-run);
+-- выключение и новый запуск возвращают всё, как было.
+local function staticScan()
+    pcall(function()
+        local roots = { LP:FindFirstChildOfClass("PlayerGui"),
+            game:GetService("CoreGui") }
+        for _, root in ipairs(roots) do
+            if root then
+                for _, g in ipairs(root:GetDescendants()) do
+                    if (g:IsA("GuiObject") or g:IsA("ScreenGui"))
+                        and g.Enabled
+                        and g:GetAttribute("RM_NoStatic") ~= true then
+                        local n = string.lower(g.Name)
+                        if (string.find(n, "static", 1, true)
+                            or string.find(n, "noise", 1, true)
+                            or string.find(n, "vhs", 1, true)
+                            or string.find(n, "glitch", 1, true))
+                            and string.sub(n, 1, 3) ~= "rm_" then -- свои не трогаем
+                            g:SetAttribute("RM_NoStatic", true)
+                            g.Enabled = false
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+local function staticRestore()
+    pcall(function()
+        local roots = { LP:FindFirstChildOfClass("PlayerGui"),
+            game:GetService("CoreGui") }
+        for _, root in ipairs(roots) do
+            if root then
+                for _, g in ipairs(root:GetDescendants()) do
+                    if g:GetAttribute("RM_NoStatic") == true then
+                        g:SetAttribute("RM_NoStatic", nil)
+                        g.Enabled = true
+                    end
+                end
+            end
+        end
+    end)
+end
+-- новый запуск стартует с тоглом OFF — гасимое прошлым прогоном возвращаем
+task.spawn(function()
+    task.wait(1) -- даём старому прогону выйти по RUN_ID (гонка со сканом)
+    if getgenv().RM_Run ~= RUN_ID then return end
+    staticRestore()
+end)
+local staticGen = 0
+PlayerTab:CreateToggle({
+    Name = "Disable Static (глушить помехи)",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_NoStatic = v
+        staticGen = staticGen + 1
+        local gen = staticGen
+        if not v then
+            staticRestore()
+            notify("Static: помехи возвращены", 2)
+            return
+        end
+        notify("Static: глушу помехи (static/noise/vhs/glitch)", 3)
+        task.spawn(function()
+            local hinted = false
+            -- помехи могут появляться заново (погоня) — скан каждую секунду
+            while G.RM_NoStatic and gen == staticGen do
+                if getgenv().RM_Run ~= RUN_ID then return end
+                staticScan()
+                if not hinted then
+                    hinted = true
+                    -- оверлеи с нашими именами не нашлись — скажи имя из
+                    -- Explorer, добавлю паттерн
+                    local marked = false
+                    pcall(function()
+                        local pg = LP:FindFirstChildOfClass("PlayerGui")
+                        if pg then
+                            for _, g in ipairs(pg:GetDescendants()) do
+                                if g:GetAttribute("RM_NoStatic") == true then
+                                    marked = true
+                                    break
+                                end
+                            end
+                        end
+                    end)
+                    if not marked then
+                        notify("Static: оверлеи static/noise/vhs не найдены —"
+                            .. " скажи реальное имя помех из Explorer", 6)
+                    end
+                end
+                task.wait(1)
+            end
+        end)
+    end,
+})
+
 PlayerTab:CreateSection("Автозабор")
 -- без флага: всегда стартует с дефолта 0.1с; слайдер опускается до 0.03
 PlayerTab:CreateSlider({
@@ -2859,6 +3097,68 @@ Night3:CreateToggle({
     end,
 })
 
+Night3:CreateSection("Kid Detector")
+G.RM_KidDetect = false -- без флага: всегда стартует выключенным
+Night3:CreateToggle({
+    Name = "Детект ребёнка (GhostChild)",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_KidDetect = v
+        notify(v and "Kid Detector: ON" or "Kid Detector: OFF", 2)
+    end,
+})
+-- движок kid detector (snippet ScriptBlox 55878): раз в секунду ищем
+-- детей (GhostChild/kid) в workspace; новое появление — в консоль,
+-- появление рядом (<60м) — уведомление. Имена — из gist «Night 3».
+task.spawn(function()
+    local known = {}
+    while true do
+        if getgenv().RM_Run ~= RUN_ID then return end
+        if G.RM_KidDetect then
+            pcall(function()
+                local lpch = LP.Character
+                local myHRP = lpch and lpch:FindFirstChild("HumanoidRootPart")
+                local now = {}
+                for _, d in ipairs(workspace:GetDescendants()) do
+                    if d:IsA("Model") then
+                        local n = string.lower(d.Name)
+                        if string.find(n, "ghostchild", 1, true)
+                            or string.find(n, "kid", 1, true) then
+                            now[d] = true
+                            if not known[d] then
+                                local md = nil
+                                pcall(function()
+                                    if myHRP then
+                                        md = (d:GetPivot().Position
+                                            - myHRP.Position).Magnitude
+                                    end
+                                end)
+                                local tag = md and (" [" .. math.floor(md) .. "м]") or ""
+                                print("[RM] Kid Detector: " .. d.Name .. tag)
+                                if md and md < 60 then
+                                    notify("Ребёнок рядом: " .. d.Name
+                                        .. " " .. math.floor(md) .. "м", 4)
+                                end
+                            end
+                        end
+                    end
+                end
+                for k in pairs(known) do
+                    if not now[k] then
+                        local okN, nm = pcall(function() return k.Name end)
+                        print("[RM] Kid Detector: ушёл "
+                            .. (okN and tostring(nm) or "?"))
+                    end
+                end
+                known = now
+            end)
+        else
+            known = {}
+        end
+        task.wait(1)
+    end
+end)
+
 -- ================= вкладка ТП: точки из RM Helper =================
 -- Координаты/имена объектов — из RM Helper (rawscripts). Летим
 -- плавно через общий smoothTP (не рывком, как у них).
@@ -2966,6 +3266,8 @@ tpBtn("Генератор (Ночь 2)", LOC.elec) -- их n2gen = те же к�
 tpBtn("Склад питания", LOC.n2stor)
 tpBtn("Радиовышка", LOC.n2tower)
 tpBtn("Офис", LOC.n2office)
+-- из RMUH (GitHub): панели давления (имя в workspace, иначе «не нашёл»)
+tpBtnNames("PressurePanels", {"PressurePanels"}, Vector3.new(0, 5, 3))
 
 TPTab:CreateSection("Ночь 2 — укрытие")
 tpBtn("Укрытие (Ночь 2)", LOC.sn2)
@@ -2984,6 +3286,11 @@ tpBtn("Дровяная кучка", LOC.woodpile)
 tpBtn("Камин", LOC.fireplace)
 tpBtn("Баррикады", LOC.barricade)
 tpBtn("Генератор (Shack)", LOC.shackgen)
+-- из frank590-star (Night 1, GitHub) и GitHubTestei
+tpBtn("Сарай (Shack)", CFrame.new(-79, 4.5, -129))
+tpBtn("Щиток (FuseBox)", CFrame.new(-1, 4.5, -92.5))
+tpBtn("Вход с улицы", CFrame.new(-11.5, 4.6, -24.2))
+tpBtn("Второй этаж (доски)", CFrame.new(-40, 23, -68))
 
 TPTab:CreateSection("Ночь 3 — лагерь")
 tpBtnNames("Лодж", {"Lodge", "MainLodge"}, Vector3.new(0, 5, 10))
@@ -3002,6 +3309,36 @@ tpBtnNames("Bloxy Cola", {"BloxyCola"}, Vector3.new(0, 3, 3))
 tpBtnNames("Мармеладка", {"Marshmallow"}, Vector3.new(0, 3, 3))
 tpBtnNames("Фотоловушка", {"TrailCamera"}, Vector3.new(0, 3, 3))
 tpBtnNames("Батарейка", {"Battery"}, Vector3.new(0, 3, 3))
+tpBtnNames("WorkerHead", {"WorkerHead"}, Vector3.new(0, 3, 3))
+tpBtnNames("Патроны (AmmoPiles)", {"AmmoPiles"}, Vector3.new(0, 3, 3))
+-- тыквы из RMUH (Pumpkin_1..7.Spot): к ближайшей случайной
+TPTab:CreateButton({
+    Name = "Тыква (случайный Spot, Ночь 3)",
+    Callback = function()
+        local spots = {}
+        for i = 1, 7 do
+            local o = workspace:FindFirstChild("Pumpkin_" .. i)
+            if o then
+                pcall(function()
+                    local s = o:FindFirstChild("Spot", true)
+                    local pos = nil
+                    if s and s:IsA("BasePart") then
+                        pos = s.Position
+                    elseif o:IsA("Model") and o.PrimaryPart then
+                        pos = o.PrimaryPart.Position
+                    end
+                    if pos then spots[#spots + 1] = pos end
+                end)
+            end
+        end
+        if #spots == 0 then
+            notify("Тыквы не найдены (это Ночь 3?)", 3)
+            return
+        end
+        local p = spots[math.random(#spots)]
+        tpToPoint(CFrame.new(p + Vector3.new(0, 3, 3)))
+    end,
+})
 
 -- (точки укрытия Ночи 3 не было ни в одном исходнике — убрали
 -- копипасту с safe1 Ночи 1)
@@ -3025,10 +3362,15 @@ tpBtnNames("Столовая", {"DiningRoom", "Dining"}, Vector3.new(0, 5, 5))
 tpBtnNames("Гостевая", {"GuestBedroom", "GuestRoom"}, Vector3.new(0, 5, 5))
 tpBtnNames("Серая комната", {"GreyBedroom", "GreyRoom"}, Vector3.new(0, 5, 5))
 tpBtnNames("Жёлтая комната", {"YellowRoom", "Catwalk"}, Vector3.new(0, 5, 5))
+-- из RMUH (GitHub)
+tpBtnNames("Haunted Mansion", { "HauntedMansion", "Haunted Mansion" },
+    Vector3.new(0, 5, 10))
+tpBtnNames("FakeCandyBag", {"FakeCandyBag"}, Vector3.new(0, 5, 3))
 
 TPTab:CreateSection("Bunker")
 tpBtnNames("Вход", {"Bunker", "BunkerDoor"}, Vector3.new(0, 5, 10))
 tpBtnNames("Внутри", {"BunkerInside", "BunkerRoom"}, Vector3.new(0, 5, 5))
+tpBtnNames("SafeSpot (бункер)", {"SafeSpot"}, Vector3.new(0, 5, 3))
 -- Плейс «The Bunker» (100255403764514) и структуры — из Bunker Helper
 -- V5 (pastefy). Сырые координаты работают ТОЛЬКО в этом плейсе, иначе
 -- улетаешь в пустоту чужой карты — стопим через inBunker().
@@ -3116,6 +3458,91 @@ TPTab:CreateButton({
             notify("Вентиляция: debris обработан", 3)
         end)
     end,
+})
+
+-- ================= паника: случайное безопасное укрытие (бинд G) =================
+-- Идея из ревью идей: при погоне — быстрый слёт в укрытие. Сырые
+-- координаты чужой карты = пустота, поэтому свой список по плейсу,
+-- для Ночи 2 ещё и по высоте (старая карта y≈6-26, новая y≈82),
+-- для карт без своих точек (Ночь 3/лобби) — укрытие по имени.
+local PANIC_N1 = {
+    { "Укрытие 1 (крыша)", LOC.safe1 },
+    { "Укрытие 2 (спальня)", LOC.safe2 },
+}
+local PANIC_N2_OLD = {
+    { "Укрытие (Ночь 2)", LOC.sn2 },
+    { "Укрытие 1 (крыша)", LOC.safe1 },
+    { "Офис", LOC.n2office },
+}
+local PANIC_N2_NEW = {
+    { "Укрытие (далеко)", LOC.n2safe },
+    { "Вход (новая карта)", LOC.n2entr },
+}
+local PANIC_BUNKER = {
+    { "Бункер: сейф-плейс", CFrame.new(-25.3077145, 25.9999943, -150.490356) },
+}
+local panicNames = { "Cabin4", "Cabin3", "Cabin2", "Cabin1", "Lodge",
+    "Closet", "Wardrobe", "Bed" }
+
+local function panicTP()
+    local ch = LP.Character
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        notify("Паника: нет персонажа", 2)
+        return
+    end
+    local pid = game.PlaceId
+    local list = nil
+    if pid == 14896802601 then
+        list = PANIC_N1
+    elseif pid == 16667550979 then
+        -- карта Ночи 2 определяется высотой персонажа
+        list = (hrp.Position.Y > 40) and PANIC_N2_NEW or PANIC_N2_OLD
+    elseif pid == 100255403764514 then
+        list = PANIC_BUNKER
+    end
+    if list and #list > 0 then
+        local pick = list[math.random(#list)]
+        pcall(function() smoothTP(hrp, pick[2]) end)
+        notify("Паника → " .. pick[1], 3)
+        return
+    end
+    -- своих координат под эту карту нет — ищем укрытие по имени
+    for _, name in ipairs(panicNames) do
+        local o = workspace:FindFirstChild(name)
+        if o then
+            local pos = nil
+            pcall(function()
+                if o:IsA("Model") and o.PrimaryPart then
+                    pos = o.PrimaryPart.Position
+                elseif o:IsA("BasePart") then
+                    pos = o.Position
+                else
+                    local h = o:FindFirstChild("Handle")
+                    if h then pos = h.Position end
+                end
+            end)
+            if pos then
+                pcall(function()
+                    smoothTP(hrp, CFrame.new(pos + Vector3.new(0, 5, 3)))
+                end)
+                notify("Паника → " .. name, 3)
+                return
+            end
+        end
+    end
+    notify("Паника: укрытий не нашёл", 3)
+end
+
+TPTab:CreateKeybind({
+    Name = "Бинд паники (случайное укрытие)",
+    CurrentKeybind = "G",
+    Flag = "RM_BindPanic",
+    Callback = function() panicTP() end,
+})
+TPTab:CreateButton({
+    Name = "Паника: случайное укрытие",
+    Callback = function() panicTP() end,
 })
 
 -- ================= вкладка ESP (только ESP) =================
@@ -3353,4 +3780,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.18 rayfield loaded | РЕВИЗИЯ: re-run (ORIG-снимки света/тумана/камеры в getgenv, smoothTP возвращает ok + гвард RUN_ID, doPickup не кликает после re-run, RenderStepped отписывается сам, NaN-защита камеры TP walk, warn с троттлингом, стамина: порог разброса 0.5, чужие Rayfield не трогаем на 1-м запуске) | v4.17: Infinite Battery (фонарь), Тревога кабины (OpenDoor), бункер-кнопки | v4.16: Mutant ESP ДОГОНЯЕТ/ИЩЕТ | Infinite O2 (V) / Noclip (F) | Ночь 2: капсула+ремоуты | ТП новая карта Н2 | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.19 rayfield loaded | НОВОЕ: Паника-ТП (бинд G, случайное укрытие), Kid Detector (Ночь 3), Disable Static (глушение помех), BunkerRat в ESP мутанта, ТП-точки (Shack/FuseBox/Тыква/WorkerHead/AmmoPiles/Haunted Mansion) | РЕВИЗИЯ: guard'ы re-run в fuelPress/электрике (клик старым прогоном), кулдаун авто-заправки 3с (анти-пинг-понг Error 267), cellTries сбрасывается и тратится только при вставке, откат к origin при re-run, длинный кулдаун залипших целей, отписка Descendant-событий, стамина guard после discover, itemNames чистится, кеширование ESP-строк, состояние мутанта из 1-сек скана, Disable Static возвращает помехи при re-run | v4.17: Infinite Battery, Тревога кабины, бункер | ESP | Settings")
