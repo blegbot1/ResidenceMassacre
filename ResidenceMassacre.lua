@@ -256,6 +256,9 @@ end
 -- после ожидания старый прогон при re-run обязан прекратить
 -- свои действия — иначе два прогона тянут персонаж в разные точки.
 local function smoothTP(hrp, cf, dur, force)
+    -- v4.37: nil-гард САМЫМ ПЕРВЫМ — раньше разыменование hrp в расчёте
+    -- dur шло ДО гарда (гард в конце был мёртвым кодом при hrp == nil)
+    if not hrp or not hrp.Parent then return false end
     if getgenv().RM_Run ~= RUN_ID then return false end
     -- п.192: окно паники блокирует не-force телепорты — игрок остаётся
     -- в укрытии (возвраты автозабора/заправки/камена не откатывают его)
@@ -920,6 +923,8 @@ local scareConn = nil
 G.RM_CabinAlert = false
 local cabinConn = nil
 local cabinGen = 0 -- поколение подписки (гонка выкл/пока ждём ремоут)
+-- v4.37: кулдаун уведомления кабины (иначе nil-арифметика в обработчике)
+local cabinLastAt = -1e9
 
 -- Тревога двери (v4.30, из gueston): мутант у входной двери — на клиенте
 -- слышен ров Growling на FrontDoor.SoundPart. Не conn, а нить-опрос:
@@ -1521,8 +1526,12 @@ local function pickSelected(name)
     if not sel or #sel == 0 then return false end
     local ln = string.lower(name)
     for _, s in ipairs(sel) do
-        local ls = string.lower(tostring(s))
-        if ls == "все" or ls == "all" then return true end
+        local raw = tostring(s)
+        local ls = string.lower(raw)
+        -- v4.37: Luau string.lower НЕ трогает кириллицу (только ASCII) —
+        -- дефолтный «Все» оставалось с заглавной, не совпадало с «все»,
+        -- и режим «Все» не собирал НИЧЕГО, пока не выберешь имена руками
+        if ls == "all" or ls == "все" or raw == "Все" then return true end
         if ls == ln then return true end
     end
     return false
@@ -1536,10 +1545,27 @@ local function doPickup(e)
     local pos = itemPos(e)
     if not pos then return end
 
+    -- v4.37: погашенное взаимодействие не читалось НИГДЕ: Enabled=false
+    -- или радиус 0 давали порог 2 стада → ОБЯЗАТЕЛЬНЫЙ ТП к «мёртвой»
+    -- точке и fire впустую каждые ~10с (тот самый пинг-понг ТП)
+    local dead = false
+    pcall(function()
+        if e.prompt and e.prompt.Enabled == false then dead = true end
+        if e.cd and e.cd.Enabled == false then dead = true end
+    end)
+    if dead then
+        e.clickAt = os.clock() + 15
+        return
+    end
+
     -- радиус активации: самый жёсткий из найденных взаимодействий
     local maxD = 32
     if e.prompt then maxD = math.min(maxD, e.prompt.MaxActivationDistance or 10) end
     if e.cd then maxD = math.min(maxD, e.cd.MaxActivationDistance or 32) end
+    if maxD <= 0 then -- радиус 0 = взаимодействие погашено
+        e.clickAt = os.clock() + 15
+        return
+    end
     -- кликнуть нечем (функции не экспортированы экзекутором) — не
     -- телепортируемся впустую, повтор через минуту
     local canFire = (e.prompt and typeof(fireproximityprompt) == "function")
@@ -1559,20 +1585,25 @@ local function doPickup(e)
     local origin = hrp.CFrame
     pcall(function()
         if dist > math.max(maxD - 3, 2) then
+            -- v4.37: точку возврата пишем ДО твина (yield ~3с): раньше
+            -- она писалась после guard'а re-run, и при re-run посреди
+            -- твина новый прогон не находил точку — персонаж бросался
+            -- у предмета навсегда (свой прогон при этом не кликал)
+            if getgenv().RM_Run == RUN_ID then
+                G.RM_TP_Origin = { cf = origin, place = game.PlaceId }
+            end
             -- телепорт рядом с предметом: для сервера — «игрок стоял рядом».
             -- true только если долетели: после re-run smoothTP вернёт false
             teleported = smoothTP(hrp, CFrame.new(pos + Vector3.new(0, 3, 0))
                 * (hrp.CFrame - hrp.CFrame.Position)) == true
+            if not teleported and getgenv().RM_Run == RUN_ID then
+                G.RM_TP_Origin = nil -- не телепортировались — точка лишняя
+            end
         end
     end)
     -- после каждого yield — проверка re-run: старый прогон не кликает
     -- и не телепортирует (его pickupBusy — свой upvalue, новый он не трогает)
     if getgenv().RM_Run ~= RUN_ID then return end
-    -- телепортнулись: запоминаем точку возврата в getgenv — новый прогон
-    -- (re-run посреди автозабора) откатит персонажа туда сам
-    if teleported then
-        G.RM_TP_Origin = { cf = origin, place = game.PlaceId }
-    end
     if teleported then task.wait(0.1) end -- позиция успевает дойти до сервера
     if getgenv().RM_Run ~= RUN_ID then return end
     pcall(function() fireItem(e) end)
@@ -1587,8 +1618,14 @@ local function doPickup(e)
     if teleported then
         task.wait(0.05)
         if getgenv().RM_Run ~= RUN_ID then return end
-        pcall(function() smoothTP(hrp, origin) end)
-        G.RM_TP_Origin = nil
+        -- v4.37: возврат без проверки = «бросание» у предмета, а точка
+        -- всё равно стиралась — следующий прогон уже не откатывал;
+        -- при неудаче (паника/re-run) точку оставляем для rollback'а
+        local retOk = false
+        pcall(function() retOk = smoothTP(hrp, origin) end)
+        if retOk and getgenv().RM_Run == RUN_ID then
+            G.RM_TP_Origin = nil
+        end
     end
     task.wait(0.1)
     pickupBusy = false
@@ -1679,6 +1716,18 @@ end
 -- встать рядом с целью (если далеко) и нажать её
 local function fuelPress(hrp, pos, cd)
     if not pos or not cd then return false end
+    -- v4.37: проверка кликера САМОЙ ПЕРВОЙ (раньше стояла после ТП) —
+    -- без fireclickdetector каждый тик уводил персонажа к цели и
+    -- обратно, клик не шёл, счётчики не растут → вечный пинг-понг
+    -- «канистра/капсула ↔ генератор», который не останавливал ни один
+    -- стоп-бюджет
+    if typeof(fireclickdetector) ~= "function" then
+        if not fuelWarned then
+            fuelWarned = true
+            print("[RM] В экзекуторе нет fireclickdetector — авто-заправка не сможет нажимать")
+        end
+        return false
+    end
     local maxD = cd.MaxActivationDistance or 32
     local dist = (pos - hrp.Position).Magnitude
     if dist > math.max(maxD - 3, 2) then
@@ -1690,17 +1739,9 @@ local function fuelPress(hrp, pos, cd)
         -- после yield мёртвый прогон (re-run) не кликает
         if getgenv().RM_Run ~= RUN_ID then return false end
     end
-    if typeof(fireclickdetector) == "function" then
-        -- клик засчитываем только если он реально прошёл: иначе
-        -- lastCanAt сбрасывается вхолостую и проверка «нет
-        -- fireclickdetector» никогда не срабатывает
-        return pcall(function() fireclickdetector(cd) end)
-    end
-    if not fuelWarned then
-        fuelWarned = true
-        print("[RM] В экзекуторе нет fireclickdetector — авто-заправка не сможет нажимать")
-    end
-    return false
+    -- клик засчитываем только если он реально прошёл: иначе
+    -- lastCanAt сбрасывается вхолостую
+    return pcall(function() fireclickdetector(cd) end)
 end
 
 -- текущий уровень топлива генератора в процентах (0..100) или nil,
@@ -1861,6 +1902,10 @@ local function fuelManual()
             pcall(function() smoothTP(hrp, origin) end)
         end
         pickupBusy = false
+        -- v4.37: ручная заправка не продлевала общий кулдаун — авто
+        -- кликал генератор через ~0.7с после ручного (нарушение
+        -- «≥3с между нажатиями генератора» = Error 267)
+        lastFuelAt = os.clock()
         if ok and done then
             print("[RM] Заправка: канистра → генератор ✓")
         elseif ok then
@@ -1973,7 +2018,16 @@ task.spawn(function()
                 local ch = LP.Character
                 local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
                 if hrp then
-                    if cellTries >= 4 and not cellWarned then
+                    -- капсула встала (свободной не осталось) — снимаем
+                    -- прошлые неудачи. v4.37: сброс ПЕРЕД печатью стопа:
+                    -- раньше порядок был обратный и счётчик от прошлой
+                    -- ночи давал ложный «авто остановлено», после чего
+                    -- цикл тут же продолжал работать
+                    if not cell and cellTries > 0 then
+                        cellTries = 0
+                        cellWarned = false
+                    end
+                    if cell and cellTries >= 4 and not cellWarned then
                         cellWarned = true
                         print("[RM] Ночь 2: капсула не вставилась 4 раза — авто остановлено. "
                             .. "Включи заново после разбора и скажи, как вставляется вручную")
@@ -1986,13 +2040,6 @@ task.spawn(function()
                         cellGenShown = gen:GetFullName()
                         print("[RM] Ночь 2: слот вставки → " .. cellGenShown)
                     end
-                    -- капсула встала (свободной не осталось) — снимаем
-                    -- прошлые неудачи: иначе счётчик памятит старую аварию
-                    -- и авто не стартует на следующей ночи
-                    if not cell and cellTries > 0 then
-                        cellTries = 0
-                        cellWarned = false
-                    end
                     if cell and cdCell and gen and cdGen and cellTries < 4 then
                         local now = os.clock()
                         local held = cell:IsDescendantOf(ch)
@@ -2003,6 +2050,10 @@ task.spawn(function()
                         -- внести: в руках или брали <15с назад; не чаще 2с
                         local wantPut = (held or dt <= 15)
                             and (now - cellTriedAt) > math.max(delay, 2)
+                            -- v4.37: первая вставка не раньше 2с после
+                            -- взятия — сервер должен успеть зарепликать
+                            -- подбор («клик+ТП раз в 0.5с» = Error 267)
+                            and (now - cellGrabAt) >= 2
 
                         if wantGrab then
                             pickupBusy = true
@@ -2030,9 +2081,13 @@ task.spawn(function()
                                 local slot = objPos(cdGen.Parent) or objPos(gen)
                                 local pressed = fuelPress(hrp, slot, cdGen)
                                 cellTriedAt = os.clock()
-                                -- 4 попытки тратим только когда капсула
-                                -- реально в руках И клик прошёл
-                                if wasHeld and pressed then
+                                -- 4 попытки жжём за ЛЮБУЮ попытку
+                                -- вставки с кликом. v4.37: раньше только
+                                -- «капсула в руках + клик» — если игра
+                                -- не кладёт её в персонес, wasHeld всегда
+                                -- false, бюджет не расходовался никогда и
+                                -- цикл «капсула ↔ генератор» шёл бесконечно
+                                if pressed then
                                     cellTries = cellTries + 1
                                 end
                                 task.wait(delay)
@@ -3671,11 +3726,19 @@ Night1:CreateSlider({
 -- Callback. П.157: Repair/Delivery делят ключ НА РЕМОУТ, не на аргумент:
 -- сервер кулдаунит remote, а не его параметры — 8 кнопок подряд
 -- рвали соединение (Error 267).
-local fireAt = {}
-local function fireThrottle(key)
+-- v4.37: кулдауны в getgenv — серверный кулдаун глобальный, а локальная
+-- таблица умирала при re-run: первый же выстрел после перезапуска шёл
+-- мгновенно (пара LoadCharacter быстрее 2с = Error 267)
+local fireAt = G.RM_FireAt or {}
+G.RM_FireAt = fireAt
+-- silent=true — для автомата (радио/флешка/поездки фарма): иначе каждая
+-- пропущенная попытка сыпала бы «Подожди пару секунд» в notify
+local function fireThrottle(key, silent)
     local now = os.clock()
     if fireAt[key] and now - fireAt[key] < 2 then
-        notify("Подожди пару секунд между нажатиями (кулдаун 2с)", 1)
+        if not silent then
+            notify("Подожди пару секунд между нажатиями (кулдаун 2с)", 1)
+        end
         return false
     end
     fireAt[key] = now
@@ -3893,7 +3956,8 @@ Night1:CreateButton({
                 end
                 -- v4.36: раньше жали каждые 0.5с до 24 раз подряд мимо
                 -- лимитера (шквал FireServer = Error 267) — через throttle
-                if fireThrottle("RadioTick") then
+                -- (silent: цикл не должен сыпать notify на каждом промахе)
+                if fireThrottle("RadioTick", true) then
                     fireclickdetector(cd)
                 end
                 task.wait(0.5)
@@ -4001,7 +4065,7 @@ Night1:CreateToggle({
                         -- с ручной кнопкой (два FireServer("1") быстрее 2с
                         -- = Error 267); ChildAdded плодил параллельные delay
                         if getgenv().RM_Run == RUN_ID and G.RM_AutoScare
-                            and fireThrottle("FlashCam") then
+                            and fireThrottle("FlashCam", true) then
                             pcall(function()
                                 local rf = game:FindFirstChild(
                                     "ReplicatedStorage")
@@ -4144,6 +4208,12 @@ Night2:CreateButton({
             notify("Идёт серия дюпа — подожди её конца", 2)
             return
         end
+        -- v4.37: респавн посреди ТП автозабора/поездки фарма ломал
+        -- всё: клик уходил со спавна, возврат шёл на мёртвый HRP
+        if pickupBusy or not panicIdle() then
+            notify("Идёт другое действие — подожди", 2)
+            return
+        end
         if not fireThrottle("LoadCharacter") then return end
         local ok, err = n2Fire("LoadCharacter")
         if ok then
@@ -4184,6 +4254,12 @@ local function makeDupUI(tab)
         Callback = function()
             if dupBusy then
                 notify("Дюп: серия уже идёт", 2)
+                return
+            end
+            -- v4.37: серия респавнов посреди автодействий = сломанные
+            -- ТП/клики соседних фич — ждём их конца (как они ждут нас)
+            if pickupBusy or not panicIdle() then
+                notify("Идёт другое действие — подожди", 2)
                 return
             end
             local n = math.clamp(G.RM_DupN or 5, 1, 10)
@@ -4280,10 +4356,20 @@ MemoriesTab:CreateToggle({
                             end
                             return
                         end
-                        if plr == LP then return end -- свой вход — не тревога
+                        -- v4.37: payload не гарантирован Player (см. ветку
+                        -- who ниже) — сравниваем и с именем/UserId
+                        if plr == LP or plr == LP.Name
+                            or plr == LP.UserId then
+                            return -- свой вход — не тревожит
+                        end
                         local who = (typeof(plr) == "Instance" and plr:IsA("Player"))
                             and plr.Name or "Кто-то (возможно, бот)"
                         local what = (typeof(door) == "Instance") and door.Name or "дверь"
+                        -- v4.37: у кабины не было кулдауна (у двери есть 15с):
+                        -- в лобби на 4–6 игроков уведомления шли пачками и
+                        -- вытесняли остальные тревоги
+                        if os.clock() - cabinLastAt < 5 then return end
+                        cabinLastAt = os.clock()
                         notify("Вторжение в кабину: " .. who
                             .. " открывает «" .. what .. "»", 4)
                     end)
@@ -4313,7 +4399,10 @@ MemoriesTab:CreateToggle({
         if v then
             notify("Тревога двери: ON", 3)
             task.spawn(function()
-                local last = 0
+                -- v4.37: 0 вместо -1e9 — первые ~15с os.clock() условие
+                -- ложно, тревога молчит, хотя мутант у двери (скрипт сам
+                -- чинил такой же «нулевой» сентинел в других кулдаунах)
+                local last = -1e9
                 while G.RM_DoorAlert and gen == doorAlertGen do
                     if getgenv().RM_Run ~= RUN_ID then return end
                     local playing = false
@@ -4529,7 +4618,9 @@ local function hfTrip(steps)
             -- вечная «зарядка» без результата); ждём кулдаун и кликаем
             local got = false
             for _ = 1, 6 do
-                if fireThrottle(s.key) then
+                -- silent: до 6 ожиданий за поездку не должны сыпать
+                -- «Подожди пару секунд» в notify
+                if fireThrottle(s.key, true) then
                     got = true
                     break
                 end
@@ -4700,14 +4791,20 @@ local function hfMenuBtns()
             btn = o:FindFirstAncestorWhichIsA("TextButton")
         end
         if btn and btn.Visible then
-            local t = (btn.Text or ""):lower()
+            local raw = btn.Text or ""
+            local t = raw:lower()
+            -- v4.37: :lower() в Luau не трогает кириллицу — «Открыть»
+            -- оставалось с заглавной «О» и не совпадало с «откр»;
+            -- сверяем и СЫРОЙ текст (заглавная первая буква)
             if not res.open and (t:find("open", 1, true)
-                or t:find("открыт", 1, true)) then
+                or t:find("откр", 1, true)
+                or raw:find("Откр", 1, true)) then
                 res.open = btn
             end
             if not res.no and (t:find("unnoticed", 1, true)
                 or t:find("не замечать", 1, true)
                 or t:find("не замечен", 1, true)
+                or raw:find("Не замеч", 1, true)
                 or t:find("ignore", 1, true)
                 or t:find("pretend", 1, true)) then
                 res.no = btn
@@ -5823,4 +5920,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.36 rayfield loaded | v4.36: ночной баг-хант (15 агентов по зонам, батчи 1–4) — откат RM_TP_Origin оживлён (type→typeof: type(CFrame)=userdata, условие было истинно всегда) и снимается ТОЛЬКО при удачном возврате (камин/радио); TP walk: нормировка диагонали W+D (√2 скорости), CFrame пишется только при отличии позиции; стамина: после 1.2с обнаружения проверяется и G.RM_StaminaLock (тогл выключили — не пишем в чужое); Ночь 1: радио кликает через fireThrottle (было до 24 кликов по 0.5с мимо лимитера = Error 267), авто-флешка под ОБЩИМ лимитером с ручной кнопкой, у Blizzard вылечена and/or-ловушка («как было» ВКЛЮЧАЛО метель при кэше false) и кэш не выбрасывается когда Blizzard не найден, кнопка «Подбросить дрова» под fireThrottle, ТП к дровам/радио проверяется (ложные «Дрова подброшены»/«Цели запущены» без ТП убраны); паника: notify при перезарядке (раньше молча глотала), кулдаун жжётся после проверки персонажа (труп не сжигал), окно паники снимается при неудачном ТП и при «укрытий не нашёл» (раньше 15с автофич были мертвы), рекурсивный фолбэк поиска укрытий; ESP: boolVal при NumberValue не перекрывал атрибут («ДОГОНЯЕТ/ИЩЕТ» мог не детектиться), modelKind фильтрует модели вне workspace (фантомы в espCache кормили аимбот); Auto Farm: panicIdle в цикле и hfTrip (фарм не вытаскивает из укрытия), hfTrip жёсткий — ТП под проверкой, лимитер клика ДОЖИДАЕТСЯ (промах = false, не ложный true), guard выключения/re-run посреди поездки, общий pickupBusy (автозабор не влезет в поездку), матчер меню понимает «не замечать» (раньше только «не замечен» — RU-ветка никогда не срабатывала), кэш окон не замораживается на 16 мин после кнопки проверки, notify зарядки троттлен, candyHeld сбрасывается при истечении окна раздачи | v4.35: Auto Farm по уточнённой механике юзера — цепочка конфет FakeCandyBag (мешок) → CandyBowl (миска) одной поездкой с двумя кликами (hfTrip теперь принимает шаги), на стук в дверь смотрим по ESP: ребёнок (GhostChild ≤25 стд от FrontDoor) → добираем конфеты и жмём «Открыть», иначе → «Не замечать» (тексты EN/RU), каждые 5с осмотр двери в консоль (ребёнок/монстр/пусто), раздача через Hitbox только при конфете, кнопка проверки показывает и мешок | v4.34: фикс кика Error 267 на Ночи 3 сразу после запуска — Anti-Kick больше НЕ удаляет Remotes.Kick (Destroy резал дерево; анти-чит Ночи 3 требует его наличие — отсюда 267 и старый Infinite yield WaitForChild(\"Kick\") из v4.24): теперь только getconnections:Disconnect на все OnClientEvent (клиентская кик-логика молчит, ремоут на месте), повтор на спавне сохранён, в консоль пишется число отключённых обработчиков | v4.33: Auto Farm (Хэллоуин, вкладка «Воспоминания»; тогл без флага — OFF на старте): база спереди камина (LivingRoomFurniture/Model/Fireplace, TweenService = общий smoothTP), конфеты CandyBowl.ClickDetector (слоты 1/2/3, хватает ~3 раза → клик-наполнение), меню ребёнка «Open» кликается само (getconnections → фолбэк VIM), раздача через FrontDoor.Hitbox.ClickDetector строго при конфете в руках (флаг + поиск candy), монстр у окна (Window-части ≤12 стд) → F через VirtualInputManager, батарея <40/130 → зарядка BatteryCrate; кнопка «Проверить объекты фарма» (✓/✗ пути) | v4.32: «Monster» из Воспоминаний подсвечивается ОДНИМ тоглом Monster ESP (вкладка ESP → Монстры) — один клик = и обычные монстры, и «Monster»; отдельный тогл из «Воспоминаний» убран | v4.31: ESP на монстра «Monster» из Воспоминаний — у модели нет Humanoid (только AnimationController, корень RootPart), раньше modelKind её отбрасывал: новый kind «memmonster» + тогл «ESP монстра (Monster)» во вкладке «Воспоминания» (цвет общий с Monster ESP), подпись «имя [дистанция]» без HP, RootPart-фолбэк позиции; камерный аим и «Под землю при опасности» теперь замечают и этого монстра (consider + RootPart) | v4.30: порт полезного из чужих скриптов (скан 14 репозиториев): «Запустить цели (радио)» — ТП к радио + клики до GameState.Active с возвратом на место (prolover), «Отключить метель» — GameState.Blizzard локально с откатом при re-run (prolover), «Бесплатные апгрейды (эксп.)» — RS.Upgrades.Generator Max/Price + показ UpgradeShop/Gambler, честный notify что сервер может не доверять клиенту (diddy), «Тревога двери» — опрос Growling на FrontDoor.SoundPart, кулдаун уведомлений 15с (gueston), «Анти-лаг (Potato)» — Plastic + ноль отражений + декали/текстуры + вода, кэш исходных значений в атрибутах RM_Pot*, восстановление при re-run и на OFF (prolover), WorkerHead (Ночь 3) в Item ESP — предмет без ClickDetector, гейт автозабора e.prompt or e.cd его не трогает (gueston), ТП «Сейфзона (воздух)» y=30 (gueston) | v4.29: убрана проверка на Residence Massacre (GameId/PlaceIds) — меню и скрипт открываются в ЛЮБОЙ игре (игровые фичи молчат, ТП-гейты от улета в пустоту защищают) | ФИКСЫ v4.28 (баг-хант 20 зон, 233 находки, отчёт BUGHUNT_v4.26.md): Под землю — кэш коллизий публикуется в getgenv (re-run возвращает коллизии + поднимает на поверхность), ручной OFF поднимает с глубины, Noclip↔Под-землю читают чужие кэши | автоэлектрика — состояние ящика = намерение клика, а не слепой toggle (flip-flop «шаг 2/шаг 3» убран), пересадка ящика одним рейсом | Паника-ТП — кулдаун 4с, труп не телепортируется, окно паники 15с (автофичи не стартуют, возвраты не откатывают из укрытия, мьютекс на время полёта), ТП-кнопки с force | smoothTP — новый твин отменяет предыдущий (два твина больше не дрались за CFrame) + таймаут ожидания (уничтоженный HRP больше не вешает поток) | «Заправить сейчас» через лимитер (анти-Error 267) | серия дюпа — лимитер на КАЖДОМ шаге, Revive блок при серии | hold-бинд аимбота — guard от зомби-цикла после re-run | Repair/Delivery — общий кулдаун на ремоут (8 кнопок не рвут соединение) | v4.27: сентинел пустого бинда Unknown → ButtonX — Roblox отдаёт input.KeyCode = Enum.KeyCode.Unknown на клики мыши/колесо/тап (DevForum 4073073; фильтр RF 3277) → v4.26 запускал ВСЕ 10 биндов на каждый клик; свип витрины только по TextBox «KeybindBox», санити старого конфига — 3 прохода (4.6/5.6/7.6с) против гонки с LoadConfiguration | v4.26: бинды «None» (под капотом тогда был Unknown — ошибки ввода убраны), автосанити + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.37 rayfield loaded | v4.37: ночной баг-хант, батчи 5–6 — кулдауны fireThrottle переехали в getgenv (локальная таблица умирала при re-run: первый выстрел после перезапуска мгновенно = Error 267) + тихий режим для автомата (радио/флешка/поездки фарма больше не сыплют «Подожди пару секунд» на каждой пропущенной попытке); fuelPress: проверка fireclickdetector ПЕРЕД ТП (без кликера каждый тик уводил персонажа к цели — вечный пинг-понг, который не останавливал ни один стоп-бюджет); ручная заправка штампует lastFuelAt в конце (авто не кликало генератор через 0.7с после ручного); Ночь 2 PowerCell: сброс cellTries ПЕРЕД печатью стопа (счётчик от прошлой ночи давал ложный «авто остановлено»), бюджет попыток жжётся за ЛЮБУЮ попытку вставки (раньше только «в руках+клик» — если капсула не попадает в персонес, цикл канистра↔генератор был бесконечен), первая вставка не раньше 2с после взятия; Тревога двери: кулдаун с -1e9 вместо 0 (первые ~15с os.clock() тревога молчала); Тревога кабины: кулдаун 5с (шла пачками в лобби) + фильтр своего входа по Name/UserId; автозабор: «Что забирать: Все» не работал вовсе — string.lower в Luau не трогает кириллицу, «Все» не совпадало с «все»; точка возврата doPickup пишется ДО твина и снимается только при удачном возврате; Enabled=false/радиус 0 = без ТП к «мёртвой» точке; кнопки Revive/Дюп ждут окончания автодействий (респавн посреди ТП ломал всё); hfMenuBtns сверяет и сырой текст («Открыть» с заглавной не матчилось :lower()); smoothTP: nil-гард первым (гард в конце был мёртвым кодом) | v4.36: ночной баг-хант (15 агентов по зонам, батчи 1–4) — откат RM_TP_Origin оживлён (type→typeof: type(CFrame)=userdata, условие было истинно всегда) и снимается ТОЛЬКО при удачном возврате (камин/радио); TP walk: нормировка диагонали W+D (√2 скорости), CFrame пишется только при отличии позиции; стамина: после 1.2с обнаружения проверяется и G.RM_StaminaLock (тогл выключили — не пишем в чужое); Ночь 1: радио кликает через fireThrottle (было до 24 кликов по 0.5с мимо лимитера = Error 267), авто-флешка под ОБЩИМ лимитером с ручной кнопкой, у Blizzard вылечена and/or-ловушка («как было» ВКЛЮЧАЛО метель при кэше false) и кэш не выбрасывается когда Blizzard не найден, кнопка «Подбросить дрова» под fireThrottle, ТП к дровам/радио проверяется (ложные «Дрова подброшены»/«Цели запущены» без ТП убраны); паника: notify при перезарядке (раньше молча глотала), кулдаун жжётся после проверки персонажа (труп не сжигал), окно паники снимается при неудачном ТП и при «укрытий не нашёл» (раньше 15с автофич были мертвы), рекурсивный фолбэк поиска укрытий; ESP: boolVal при NumberValue не перекрывал атрибут («ДОГОНЯЕТ/ИЩЕТ» мог не детектиться), modelKind фильтрует модели вне workspace (фантомы в espCache кормили аимбот); Auto Farm: panicIdle в цикле и hfTrip (фарм не вытаскивает из укрытия), hfTrip жёсткий — ТП под проверкой, лимитер клика ДОЖИДАЕТСЯ (промах = false, не ложный true), guard выключения/re-run посреди поездки, общий pickupBusy (автозабор не влезет в поездку), матчер меню понимает «не замечать» (раньше только «не замечен» — RU-ветка никогда не срабатывала), кэш окон не замораживается на 16 мин после кнопки проверки, notify зарядки троттлен, candyHeld сбрасывается при истечении окна раздачи | v4.35: Auto Farm по уточнённой механике юзера — цепочка конфет FakeCandyBag (мешок) → CandyBowl (миска) одной поездкой с двумя кликами (hfTrip теперь принимает шаги), на стук в дверь смотрим по ESP: ребёнок (GhostChild ≤25 стд от FrontDoor) → добираем конфеты и жмём «Открыть», иначе → «Не замечать» (тексты EN/RU), каждые 5с осмотр двери в консоль (ребёнок/монстр/пусто), раздача через Hitbox только при конфете, кнопка проверки показывает и мешок | v4.34: фикс кика Error 267 на Ночи 3 сразу после запуска — Anti-Kick больше НЕ удаляет Remotes.Kick (Destroy резал дерево; анти-чит Ночи 3 требует его наличие — отсюда 267 и старый Infinite yield WaitForChild(\"Kick\") из v4.24): теперь только getconnections:Disconnect на все OnClientEvent (клиентская кик-логика молчит, ремоут на месте), повтор на спавне сохранён, в консоль пишется число отключённых обработчиков | v4.33: Auto Farm (Хэллоуин, вкладка «Воспоминания»; тогл без флага — OFF на старте): база спереди камина (LivingRoomFurniture/Model/Fireplace, TweenService = общий smoothTP), конфеты CandyBowl.ClickDetector (слоты 1/2/3, хватает ~3 раза → клик-наполнение), меню ребёнка «Open» кликается само (getconnections → фолбэк VIM), раздача через FrontDoor.Hitbox.ClickDetector строго при конфете в руках (флаг + поиск candy), монстр у окна (Window-части ≤12 стд) → F через VirtualInputManager, батарея <40/130 → зарядка BatteryCrate; кнопка «Проверить объекты фарма» (✓/✗ пути) | v4.32: «Monster» из Воспоминаний подсвечивается ОДНИМ тоглом Monster ESP (вкладка ESP → Монстры) — один клик = и обычные монстры, и «Monster»; отдельный тогл из «Воспоминаний» убран | v4.31: ESP на монстра «Monster» из Воспоминаний — у модели нет Humanoid (только AnimationController, корень RootPart), раньше modelKind её отбрасывал: новый kind «memmonster» + тогл «ESP монстра (Monster)» во вкладке «Воспоминания» (цвет общий с Monster ESP), подпись «имя [дистанция]» без HP, RootPart-фолбэк позиции; камерный аим и «Под землю при опасности» теперь замечают и этого монстра (consider + RootPart) | v4.30: порт полезного из чужих скриптов (скан 14 репозиториев): «Запустить цели (радио)» — ТП к радио + клики до GameState.Active с возвратом на место (prolover), «Отключить метель» — GameState.Blizzard локально с откатом при re-run (prolover), «Бесплатные апгрейды (эксп.)» — RS.Upgrades.Generator Max/Price + показ UpgradeShop/Gambler, честный notify что сервер может не доверять клиенту (diddy), «Тревога двери» — опрос Growling на FrontDoor.SoundPart, кулдаун уведомлений 15с (gueston), «Анти-лаг (Potato)» — Plastic + ноль отражений + декали/текстуры + вода, кэш исходных значений в атрибутах RM_Pot*, восстановление при re-run и на OFF (prolover), WorkerHead (Ночь 3) в Item ESP — предмет без ClickDetector, гейт автозабора e.prompt or e.cd его не трогает (gueston), ТП «Сейфзона (воздух)» y=30 (gueston) | v4.29: убрана проверка на Residence Massacre (GameId/PlaceIds) — меню и скрипт открываются в ЛЮБОЙ игре (игровые фичи молчат, ТП-гейты от улета в пустоту защищают) | ФИКСЫ v4.28 (баг-хант 20 зон, 233 находки, отчёт BUGHUNT_v4.26.md): Под землю — кэш коллизий публикуется в getgenv (re-run возвращает коллизии + поднимает на поверхность), ручной OFF поднимает с глубины, Noclip↔Под-землю читают чужие кэши | автоэлектрика — состояние ящика = намерение клика, а не слепой toggle (flip-flop «шаг 2/шаг 3» убран), пересадка ящика одним рейсом | Паника-ТП — кулдаун 4с, труп не телепортируется, окно паники 15с (автофичи не стартуют, возвраты не откатывают из укрытия, мьютекс на время полёта), ТП-кнопки с force | smoothTP — новый твин отменяет предыдущий (два твина больше не дрались за CFrame) + таймаут ожидания (уничтоженный HRP больше не вешает поток) | «Заправить сейчас» через лимитер (анти-Error 267) | серия дюпа — лимитер на КАЖДОМ шаге, Revive блок при серии | hold-бинд аимбота — guard от зомби-цикла после re-run | Repair/Delivery — общий кулдаун на ремоут (8 кнопок не рвут соединение) | v4.27: сентинел пустого бинда Unknown → ButtonX — Roblox отдаёт input.KeyCode = Enum.KeyCode.Unknown на клики мыши/колесо/тап (DevForum 4073073; фильтр RF 3277) → v4.26 запускал ВСЕ 10 биндов на каждый клик; свип витрины только по TextBox «KeybindBox», санити старого конфига — 3 прохода (4.6/5.6/7.6с) против гонки с LoadConfiguration | v4.26: бинды «None» (под капотом тогда был Unknown — ошибки ввода убраны), автосанити + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
