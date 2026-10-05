@@ -47,6 +47,31 @@ local RUN_ID = getgenv().RM_Run
 -- signature — на ПЕРВОМ запуске (RM_Run == 1) его не трогаем,
 -- иначе убивалось бы любое чужое окно этой библиотеки. На re-run
 -- чистим: там обязано быть наше окно прошлого прогона.
+-- 1) Старая БИБЛИОТЕКА Rayfield: у неё живут подписки InputBegan
+-- (каждый бинд + прятка окна) — без Destroy() клавиша выполняла бы
+-- И старый, и новый callback (двойное переключение флагов). Плюс её
+-- task.delay(4, LoadConfiguration) мог не успеть отработать.
+pcall(function()
+    local oldLib = G.RM_RayfieldLib
+    if oldLib and type(oldLib.Destroy) == "function" then
+        oldLib:Destroy()
+    end
+end)
+G.RM_RayfieldLib = nil
+-- 2) Noclip переживал re-run молча: окно пересоздаётся «выкл»
+-- (G.RM_Noclip = false), а коллизии остаются выключенными —
+-- возвращаем по сохранённой таблице исходных значений
+pcall(function()
+    local saved = G.RM_NoclipSaved
+    if type(saved) == "table" then
+        for part, was in pairs(saved) do
+            if part and part.Parent then part.CanCollide = was end
+        end
+    end
+end)
+G.RM_NoclipSaved = nil
+-- 3) Disable Static: новый запуск всегда со стартовым OFF
+G.RM_NoStatic = false
 pcall(function()
     for _, g in ipairs(game:GetService("CoreGui"):GetChildren()) do
         if g:IsA("ScreenGui") then
@@ -458,7 +483,7 @@ end)
 -- Не сканируем постоянно: ОДИН раз находим реальную стамину
 -- (та, что падает при беге), запоминаем ссылку и дальше крутим
 -- только её. Рескан только если значение исчезло (респавн).
-G.RM_StaminaLock = G.RM_StaminaLock or false
+-- (дубль сброса не нужен: G.RM_StaminaLock уже = false в дефолтах)
 local stamNames = {"stam", "stmina", "energy", "fatigue", "sprint", "endurance"}
 local stamRef = nil     -- {v=Instance, max=number, path=string}
 local stamNoteOnce = false
@@ -702,7 +727,10 @@ local cabinGen = 0 -- поколение подписки (гонка выкл/�
 -- Noclip: подключается тоглом в GUI (здесь только состояние)
 G.RM_Noclip = false
 local noclipConn = nil
-local noclipSaved = {} -- исходные CanCollide до включения (чтобы вернуть свои)
+-- исходные CanCollide до включения (чтобы вернуть свои) — лежат в
+-- getgenv: при re-run новый прогон вернул бы стены сам (блок старта)
+local noclipSaved = G.RM_NoclipSaved or {}
+G.RM_NoclipSaved = noclipSaved
 
 -- ================= Mutant ESP =================
 -- Красный хайлайт + метка (дистанция и HP) через стены.
@@ -2162,6 +2190,9 @@ if not Rayfield then
     pcall(function() RunService:UnbindFromRenderStep("RMAimMonster") end)
     return
 end
+-- держим ссылку на библиотеку: при re-run убиваем её целиком
+-- (см. блок старта) — иначе её InputBegan-подписки живут вечно
+G.RM_RayfieldLib = Rayfield
 
 -- ================= ELITE HUB theme (black / purple) =================
 -- та же таблица темы, что и в Fort Blox — Rayfield принимает её как есть
@@ -2391,9 +2422,15 @@ Main:CreateToggle({
     CurrentValue = G.RM_FB,
     Flag = "RM_FB",
     Callback = function(v)
+        local old = G.RM_FB
         G.RM_FB = v
         applyLight()
-        notify("Fullbright: " .. (v and "ON" or "OFF"), 2)
+        -- уведомляем только при реальном изменении: автозагрузка конфига
+        -- Rayfield (+4с) дёргает Set и с тем же значением (цепочка or у
+        -- false падает в nil) — иначе самопроизвольные «Fullbright: …»
+        if old ~= v then
+            notify("Fullbright: " .. (v and "ON" or "OFF"), 2)
+        end
     end,
 })
 
@@ -2441,7 +2478,8 @@ PlayerTab:CreateSlider({
     end,
 })
 
--- без флага: всегда стартует с дефолта 500 (минимальное время твина)
+-- без флага: значение живёт в getgenv до конца сессии — re-run
+-- стартует с последнего значения слайдера (сброс только перезапуском Roblox)
 PlayerTab:CreateSlider({
     Name = "Скорость твинов",
     Range = {50, 1000},
@@ -2454,7 +2492,7 @@ PlayerTab:CreateSlider({
 })
 
 PlayerTab:CreateKeybind({
-    Name = "Бинд TP speed",
+    Name = "Бинд Speed (TP walk)",
     CurrentKeybind = "B",
     Flag = "RM_BindSpeed",
     Callback = function()
@@ -2560,7 +2598,11 @@ noclipToggle = PlayerTab:CreateToggle({
         if v then
             if noclipConn then noclipConn:Disconnect() noclipConn = nil end
             noclipConn = RunService.Stepped:Connect(function()
-                if getgenv().RM_Run ~= RUN_ID then return end
+                if getgenv().RM_Run ~= RUN_ID then
+                    -- re-run: коннект отписывается сам, иначе живёт вечно
+                    if noclipConn then noclipConn:Disconnect() noclipConn = nil end
+                    return
+                end
                 pcall(function()
                     local ch = LP.Character
                     if ch then
@@ -2586,6 +2628,7 @@ noclipToggle = PlayerTab:CreateToggle({
                 end
             end)
             noclipSaved = {}
+            G.RM_NoclipSaved = noclipSaved -- alias для следующего прогона
             notify("Noclip OFF", 2)
         end
     end,
@@ -2715,7 +2758,8 @@ PlayerTab:CreateToggle({
 })
 
 PlayerTab:CreateSection("Автозабор")
--- без флага: всегда стартует с дефолта 0.1с; слайдер опускается до 0.03
+-- без флага: значение живёт в getgenv до конца сессии (re-run
+-- продолжает с последнего); слайдер опускается до 0.03
 PlayerTab:CreateSlider({
     Name = "Скорость действий",
     Range = {0.03, 5},
@@ -2860,26 +2904,37 @@ Night1:CreateButton({
         pickupBusy = true
         local ok, err = pcall(function()
             if det:IsA("BasePart") then det.CanCollide = false end
+            -- точка возврата в getgenv: re-run посреди действия
+            -- откатит персонажа сам (как автозабор)
+            G.RM_TP_Origin = { cf = origin, place = game.PlaceId }
             smoothTP(hrp, CFrame.new(-27.149, 8.7, -118.612))
             task.wait(0.25)
+            if getgenv().RM_Run ~= RUN_ID then return end
             fireclickdetector(cd)
             task.wait(0.25)
+            if getgenv().RM_Run ~= RUN_ID then return end
             smoothTP(hrp, CFrame.new(-45.114, 7.85, -60.241))
             task.wait(0.5)
         end)
-        -- вернуть коллизию дровяной кучки, какой она была
+        -- вернуть коллизию дровяной кучки, какой она была (всегда:
+        -- объект наш, а не персонажа — и мёртвому прогону это нужно)
         pcall(function()
             if detWas ~= nil and det:IsA("BasePart") then
                 det.CanCollide = detWas
             end
         end)
-        pcall(function() smoothTP(hrp, origin) end)
-        pickupBusy = false
-        if ok then
-            notify("Дрова подброшены в камин", 2)
-        else
-            print("[RM] камин: " .. tostring(err))
-            notify("Камин: ошибка — смотри консоль", 3)
+        if getgenv().RM_Run == RUN_ID then
+            -- живой прогон: возврат, снятие флага, ответ.
+            -- мёртвый оставляет RM_TP_Origin — новый прогон откатит сам
+            pcall(function() smoothTP(hrp, origin) end)
+            G.RM_TP_Origin = nil
+            pickupBusy = false
+            if ok then
+                notify("Дрова подброшены в камин", 2)
+            else
+                print("[RM] камин: " .. tostring(err))
+                notify("Камин: ошибка — смотри консоль", 3)
+            end
         end
     end,
 })
@@ -2893,7 +2948,11 @@ Night1:CreateToggle({
         if v then
             if scareConn then scareConn:Disconnect() scareConn = nil end
             scareConn = workspace.ChildAdded:Connect(function(obj)
-                if getgenv().RM_Run ~= RUN_ID then return end
+                if getgenv().RM_Run ~= RUN_ID then
+                    -- re-run: подписка отписывается сам
+                    if scareConn then scareConn:Disconnect() scareConn = nil end
+                    return
+                end
                 if not G.RM_AutoScare then return end
                 if obj.Name ~= "Mutant" then return end
                 local inside = false
@@ -2930,9 +2989,25 @@ Night1:CreateToggle({
         end
     end,
 })
+-- общий кулдаун на «горячие» кнопки с FireServer: двойной клик или
+-- зажатие не должны шлеть серию одинаковых вызовов — тот же риск
+-- Error 267, что мы уже лечили у автозаправки. Ключ включает аргумент
+-- (Repair/Delivery — это 4+4 РАЗНЫХ кнопки, у каждой свой кулдаун).
+local fireAt = {}
+local function fireThrottle(key)
+    local now = os.clock()
+    if fireAt[key] and now - fireAt[key] < 2 then
+        notify("Подожди пару секунд между нажатиями (кулдаун 2с)", 1)
+        return false
+    end
+    fireAt[key] = now
+    return true
+end
+
 Night1:CreateButton({
     Name = "Флешнуть камеру",
     Callback = function()
+        if not fireThrottle("FlashCam") then return end
         local ok, err = pcall(function()
             local rf = game:FindFirstChild("ReplicatedStorage")
             rf = rf and rf:FindFirstChild("Remotes")
@@ -2994,6 +3069,7 @@ for i = 1, 4 do
     Night2:CreateButton({
         Name = "Починить провод " .. n,
         Callback = function()
+            if not fireThrottle("Repair" .. n) then return end
             local ok, err = n2Fire("Repair", n)
             if ok then
                 notify("Провод " .. n .. ": отправлен (если RepairWorker жив)",
@@ -3010,6 +3086,7 @@ for _, item in ipairs({ "Camera", "Lock", "UVLamp", "MotionSensor" }) do
     Night2:CreateButton({
         Name = "Доставка: " .. nm,
         Callback = function()
+            if not fireThrottle("Delivery" .. nm) then return end
             local ok, err = n2Fire("Delivery", nm)
             if ok then
                 notify("Доставка заказана: " .. nm, 2)
@@ -3023,6 +3100,7 @@ end
 Night2:CreateButton({
     Name = "Escape-Snatch (вырваться)",
     Callback = function()
+        if not fireThrottle("EscapeSnatch") then return end
         local ok, err = n2Fire("EscapeSnatch")
         if ok then
             notify("Попытка вырваться", 2)
@@ -3035,6 +3113,7 @@ Night2:CreateButton({
 Night2:CreateButton({
     Name = "Revive (воскрешение)",
     Callback = function()
+        if not fireThrottle("LoadCharacter") then return end
         local ok, err = n2Fire("LoadCharacter")
         if ok then
             notify("Воскрешение...", 2)
@@ -3078,7 +3157,13 @@ Night3:CreateToggle({
                 if not (G.RM_CabinAlert and gen == cabinGen) then return end
                 if rem and rem:IsA("RemoteEvent") then
                     cabinConn = rem.OnClientEvent:Connect(function(plr, door)
-                        if getgenv().RM_Run ~= RUN_ID then return end
+                        if getgenv().RM_Run ~= RUN_ID then
+                            -- re-run: подписка отписывается сам
+                            if cabinConn then
+                                cabinConn:Disconnect() cabinConn = nil
+                            end
+                            return
+                        end
                         if plr == LP then return end -- свой вход — не тревога
                         local who = (typeof(plr) == "Instance" and plr:IsA("Player"))
                             and plr.Name or "Кто-то (возможно, бот)"
@@ -3199,10 +3284,22 @@ local function tpToNames(names, offset)
     notify("ТП: не нашёл «" .. tostring(names[1]) .. "»", 3)
 end
 
-local function tpBtn(title, cf)
+-- gate: необязательная функция → ok, почему. Сырой CF чужой карты =
+-- пустота (координаты между плейсами не пересекаются), поэтому «наши»
+-- точки летят только со своего плейса/своей карты — иначе notify.
+local function tpBtn(title, cf, gate)
     TPTab:CreateButton({
         Name = title,
-        Callback = function() tpToPoint(cf) end,
+        Callback = function()
+            if gate then
+                local ok, why = gate()
+                if not ok then
+                    notify("ТП: " .. tostring(why), 3)
+                    return
+                end
+            end
+            tpToPoint(cf)
+        end,
     })
 end
 local function tpBtnNames(title, names, offset)
@@ -3244,53 +3341,86 @@ local LOC = {
     n2safe   = CFrame.new(-339.321, 82.4, -40.622),
 }
 
+-- ==== гейты карт для сырых точек ====
+-- Дом/завод (y≈6-26): только плейсы Ночи 1/Ночи 2; на Ночи 2 ещё и
+-- по высоте персонажа — старая (y≈6-26) и новая (y≈82) карты не
+-- сосуществуют в одном workspace. Бункер/лобби/Ночь 3 получают эти
+-- координаты как «пустоту» — не летим.
+local function gateOldFactory()
+    local pid = game.PlaceId
+    if pid ~= 14896802601 and pid ~= 16667550979 then
+        return false, "точка дом/завод — только на плейсе Ночи 1/Ночи 2"
+    end
+    if pid == 16667550979 then
+        local ch = LP.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        if hrp and hrp.Position.Y > 40 then
+            return false, "ты на НОВОЙ карте Ночи 2 — это точка старой"
+        end
+    end
+    return true
+end
+-- Новая карта Ночи 2 (y≈82): только её плейс и только стоя на ней
+local function gateNewN2()
+    if game.PlaceId ~= 16667550979 then
+        return false, "новая карта — только на плейсе Ночи 2"
+    end
+    local ch = LP.Character
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    if hrp and hrp.Position.Y < 40 then
+        return false, "ты на СТАРОЙ карте Ночи 2 — точки y≈82 туда не летят"
+    end
+    return true
+end
+
 TPTab:CreateSection("Ночь 1 — дом")
-tpBtn("Дом (спавн)", LOC.home)
-tpBtn("Гостиная", LOC.living)
-tpBtn("Спальня", LOC.bedroom)
-tpBtn("Ванная", LOC.bathroom)
-tpBtn("Этаж 2", LOC.floor2)
-tpBtn("Лестница", LOC.ladder)
+tpBtn("Дом (спавн)", LOC.home, gateOldFactory)
+tpBtn("Гостиная", LOC.living, gateOldFactory)
+tpBtn("Спальня", LOC.bedroom, gateOldFactory)
+tpBtn("Ванная", LOC.bathroom, gateOldFactory)
+tpBtn("Этаж 2", LOC.floor2, gateOldFactory)
+tpBtn("Лестница", LOC.ladder, gateOldFactory)
 
 TPTab:CreateSection("Ночь 1 — цели")
-tpBtn("Пульт питания", LOC.power)
-tpBtn("Кислородный генератор", LOC.oxygen)
-tpBtn("Электрогенератор", LOC.elec)
+tpBtn("Пульт питания", LOC.power, gateOldFactory)
+tpBtn("Кислородный генератор", LOC.oxygen, gateOldFactory)
+tpBtn("Электрогенератор", LOC.elec, gateOldFactory)
 
 TPTab:CreateSection("Ночь 1 — укрытия")
-tpBtn("Укрытие 1 (крыша)", LOC.safe1)
-tpBtn("Укрытие 2 (спальня)", LOC.safe2)
+tpBtn("Укрытие 1 (крыша)", LOC.safe1, gateOldFactory)
+tpBtn("Укрытие 2 (спальня)", LOC.safe2, gateOldFactory)
 
 TPTab:CreateSection("Ночь 2 — завод")
-tpBtn("Генератор (Ночь 2)", LOC.elec) -- их n2gen = те же координаты
-tpBtn("Склад питания", LOC.n2stor)
-tpBtn("Радиовышка", LOC.n2tower)
-tpBtn("Офис", LOC.n2office)
+-- их n2gen = те же координаты, что и наш Электрогенератор (старая карта)
+tpBtn("Генератор (Ночь 2)", LOC.elec, gateOldFactory)
+tpBtn("Склад питания", LOC.n2stor, gateOldFactory)
+tpBtn("Радиовышка", LOC.n2tower, gateOldFactory)
+tpBtn("Офис", LOC.n2office, gateOldFactory)
 -- из RMUH (GitHub): панели давления (имя в workspace, иначе «не нашёл»)
 tpBtnNames("PressurePanels", {"PressurePanels"}, Vector3.new(0, 5, 3))
 
 TPTab:CreateSection("Ночь 2 — укрытие")
-tpBtn("Укрытие (Ночь 2)", LOC.sn2)
+tpBtn("Укрытие (Ночь 2)", LOC.sn2, gateOldFactory)
 
 TPTab:CreateSection("Ночь 2 — новая карта")
-tpBtn("Главный зал", LOC.n2main)
-tpBtn("Вход", LOC.n2entr)
-tpBtn("Коридор 1", LOC.n2corr1)
-tpBtn("Коридор 2", LOC.n2corr2)
-tpBtn("Доска доставок", LOC.n2board)
-tpBtn("Укрытие (далеко)", LOC.n2safe)
+tpBtn("Главный зал", LOC.n2main, gateNewN2)
+tpBtn("Вход", LOC.n2entr, gateNewN2)
+tpBtn("Коридор 1", LOC.n2corr1, gateNewN2)
+tpBtn("Коридор 2", LOC.n2corr2, gateNewN2)
+tpBtn("Доска доставок", LOC.n2board, gateNewN2)
+tpBtn("Укрытие (далеко)", LOC.n2safe, gateNewN2)
 
 TPTab:CreateSection("Ночь 1 — доп. точки")
-tpBtn("Вход в дом", LOC.entrance)
-tpBtn("Дровяная кучка", LOC.woodpile)
-tpBtn("Камин", LOC.fireplace)
-tpBtn("Баррикады", LOC.barricade)
-tpBtn("Генератор (Shack)", LOC.shackgen)
+tpBtn("Вход в дом", LOC.entrance, gateOldFactory)
+tpBtn("Дровяная кучка", LOC.woodpile, gateOldFactory)
+tpBtn("Камин", LOC.fireplace, gateOldFactory)
+tpBtn("Баррикады", LOC.barricade, gateOldFactory)
+tpBtn("Генератор (Shack)", LOC.shackgen, gateOldFactory)
 -- из frank590-star (Night 1, GitHub) и GitHubTestei
-tpBtn("Сарай (Shack)", CFrame.new(-79, 4.5, -129))
-tpBtn("Щиток (FuseBox)", CFrame.new(-1, 4.5, -92.5))
-tpBtn("Вход с улицы", CFrame.new(-11.5, 4.6, -24.2))
-tpBtn("Второй этаж (доски)", CFrame.new(-40, 23, -68))
+tpBtn("Сарай (Shack)", CFrame.new(-79, 4.5, -129), gateOldFactory)
+tpBtn("Щиток (FuseBox)", CFrame.new(-1, 4.5, -92.5), gateOldFactory)
+tpBtn("Вход с улицы", CFrame.new(-11.5, 4.6, -24.2), gateOldFactory)
+tpBtn("Второй этаж (доски)", CFrame.new(-40, 23, -68), gateOldFactory)
 
 TPTab:CreateSection("Ночь 3 — лагерь")
 tpBtnNames("Лодж", {"Lodge", "MainLodge"}, Vector3.new(0, 5, 10))
@@ -3431,6 +3561,8 @@ TPTab:CreateButton({
             local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
             if not hrp then pickupBusy = false return end
             local origin = hrp.CFrame -- точка возврата — как можно раньше
+            -- возврат при re-run: новый прогон откатит персонажа сам
+            G.RM_TP_Origin = { cf = origin, place = game.PlaceId }
             pcall(function()
                 smoothTP(hrp, CFrame.new(68.3592224, 16.9999943, 74.6261444,
                     -0.999991238, -9.77371215e-08, 0.00418279972,
@@ -3439,8 +3571,16 @@ TPTab:CreateButton({
             end)
             task.wait(0.6)
             local untilAt = os.clock() + 7
+            local stale = false
             while os.clock() < untilAt do
-                if getgenv().RM_Run ~= RUN_ID then return end
+                if getgenv().RM_Run ~= RUN_ID then
+                    -- re-run: НЕ делаем return мимо возврата — просто
+                    -- выходим из цикла, а дальше «мёртвый» прогон сам
+                    -- разберётся: он не трогает персонажа, а RM_TP_Origin
+                    -- оставит новому прогону на откат
+                    stale = true
+                    break
+                end
                 pcall(function()
                     local v = workspace:FindFirstChild("Ventilation")
                     local d = v and v:FindFirstChild("Debris")
@@ -3453,7 +3593,9 @@ TPTab:CreateButton({
                 end)
                 task.wait(0.15)
             end
+            if stale then return end
             pcall(function() smoothTP(hrp, origin) end)
+            G.RM_TP_Origin = nil
             pickupBusy = false
             notify("Вентиляция: debris обработан", 3)
         end)
@@ -3485,6 +3627,7 @@ local panicNames = { "Cabin4", "Cabin3", "Cabin2", "Cabin1", "Lodge",
     "Closet", "Wardrobe", "Bed" }
 
 local function panicTP()
+    if getgenv().RM_Run ~= RUN_ID then return end
     local ch = LP.Character
     local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
     if not hrp then
@@ -3504,6 +3647,7 @@ local function panicTP()
     if list and #list > 0 then
         local pick = list[math.random(#list)]
         pcall(function() smoothTP(hrp, pick[2]) end)
+        if getgenv().RM_Run ~= RUN_ID then return end
         notify("Паника → " .. pick[1], 3)
         return
     end
@@ -3526,6 +3670,7 @@ local function panicTP()
                 pcall(function()
                     smoothTP(hrp, CFrame.new(pos + Vector3.new(0, 5, 3)))
                 end)
+                if getgenv().RM_Run ~= RUN_ID then return end
                 notify("Паника → " .. name, 3)
                 return
             end
@@ -3546,6 +3691,26 @@ TPTab:CreateButton({
 })
 
 -- ================= вкладка ESP (только ESP) =================
+-- Безопасное создание ColorPicker: у старой/чужой версии Rayfield
+-- метода может не быть — раньше это роняло весь скрипт на первом же
+-- пикере (всё после — Settings, маркер — пропадало).
+local function mkPicker(parent, settings)
+    if type(parent.CreateColorPicker) ~= "function" then
+        notify("В этой версии Rayfield нет ColorPicker — цвета пропущены", 5)
+        return
+    end
+    return parent:CreateColorPicker(settings)
+end
+-- Реестр колбэков цвета: ColorPicker:Set у Rayfield НЕ вызывает
+-- Callback (в отличие от Toggle) — автозагрузка конфига (+4с)
+-- подставляет цвет в GUI, а наше G.*/RM_Theme остаётся дефолтным.
+-- На +5с прогоняем сохранённые цвета через эти же колбэки.
+local colorResync = {} -- flagName -> колбэк
+local function colorCb(flag, fn)
+    colorResync[flag] = fn
+    return fn
+end
+
 local ESP = Window:CreateTab("ESP", 4483362458)
 
 ESP:CreateSection("Игроки")
@@ -3554,17 +3719,20 @@ ESP:CreateToggle({
     CurrentValue = G.RM_PlayerESP,
     Flag = "RM_PlayerESP",
     Callback = function(v)
+        local old = G.RM_PlayerESP
         G.RM_PlayerESP = v
-        notify("Player ESP: " .. (v and "ON" or "OFF"), 2)
+        if old ~= v then
+            notify("Player ESP: " .. (v and "ON" or "OFF"), 2)
+        end
     end,
 })
-ESP:CreateColorPicker({
+mkPicker(ESP, {
     Name = "Player ESP color",
     Color = G.RM_PlayerColor,
     Flag = "RM_PlayerColor",
-    Callback = function(v)
+    Callback = colorCb("RM_PlayerColor", function(v)
         G.RM_PlayerColor = v
-    end,
+    end),
 })
 
 ESP:CreateSection("Монстры")
@@ -3573,32 +3741,38 @@ ESP:CreateToggle({
     CurrentValue = G.RM_MonsterESP,
     Flag = "RM_MonsterESP",
     Callback = function(v)
+        local old = G.RM_MonsterESP
         G.RM_MonsterESP = v
-        notify("Monster ESP: " .. (v and "ON" or "OFF"), 2)
+        if old ~= v then
+            notify("Monster ESP: " .. (v and "ON" or "OFF"), 2)
+        end
     end,
 })
-ESP:CreateColorPicker({
+mkPicker(ESP, {
     Name = "Monster ESP color",
     Color = G.RM_MonsterColor,
     Flag = "RM_MonsterColor",
-    Callback = function(v)
+    Callback = colorCb("RM_MonsterColor", function(v)
         G.RM_MonsterColor = v
-    end,
+    end),
 })
 ESP:CreateToggle({
     Name = "Mutant ESP",
     CurrentValue = G.RM_MutantESP,
     Flag = "RM_MutantESP",
     Callback = function(v)
+        local old = G.RM_MutantESP
         G.RM_MutantESP = v
-        notify("Mutant ESP: " .. (v and "ON" or "OFF"), 2)
+        if old ~= v then
+            notify("Mutant ESP: " .. (v and "ON" or "OFF"), 2)
+        end
     end,
 })
-ESP:CreateColorPicker({
+mkPicker(ESP, {
     Name = "Mutant ESP color",
     Color = G.RM_MutantColor,
     Flag = "RM_MutantColor",
-    Callback = function(v)
+    Callback = colorCb("RM_MutantColor", function(v)
         G.RM_MutantColor = v
         for _, e in ipairs(mutantCache) do
             pcall(function()
@@ -3606,7 +3780,7 @@ ESP:CreateColorPicker({
                 e.lbl.TextColor3 = v
             end)
         end
-    end,
+    end),
 })
 ESP:CreateSection("Предметы")
 ESP:CreateToggle({
@@ -3614,17 +3788,20 @@ ESP:CreateToggle({
     CurrentValue = G.RM_ItemESP,
     Flag = "RM_ItemESP",
     Callback = function(v)
+        local old = G.RM_ItemESP
         G.RM_ItemESP = v
-        notify("Item ESP: " .. (v and "ON" or "OFF"), 2)
+        if old ~= v then
+            notify("Item ESP: " .. (v and "ON" or "OFF"), 2)
+        end
     end,
 })
-ESP:CreateColorPicker({
+mkPicker(ESP, {
     Name = "Item ESP color",
     Color = G.RM_ItemColor,
     Flag = "RM_ItemColor",
-    Callback = function(v)
+    Callback = colorCb("RM_ItemColor", function(v)
         G.RM_ItemColor = v
-    end,
+    end),
 })
 
 -- ================= вкладка Settings (кастомизация темы) =================
@@ -3712,11 +3889,11 @@ SettingsTab:CreateDropdown({
 })
 
 
-SettingsTab:CreateColorPicker({
+mkPicker(SettingsTab, {
     Name = "Акцент",
     Color = getgenv().RM_Theme.TabBackgroundSelected,
     Flag = "RM_ThemeAccent",
-    Callback = function(c)
+    Callback = colorCb("RM_ThemeAccent", function(c)
         setThemeKeys({
             Accent = c,
             TabBackgroundSelected = c,
@@ -3729,14 +3906,14 @@ SettingsTab:CreateColorPicker({
             DropdownSelected = c:Lerp(Color3.new(0, 0, 0), 0.5),
         })
         recolorGradient(c)
-    end,
+    end),
 })
 
-SettingsTab:CreateColorPicker({
+mkPicker(SettingsTab, {
     Name = "Фон окна",
     Color = getgenv().RM_Theme.Background,
     Flag = "RM_ThemeBg",
-    Callback = function(c)
+    Callback = colorCb("RM_ThemeBg", function(c)
         setThemeKeys({
             Background = c,
             Topbar = c:Lerp(Color3.new(1, 1, 1), 0.07),
@@ -3749,21 +3926,39 @@ SettingsTab:CreateColorPicker({
             TabBackground = c:Lerp(Color3.new(1, 1, 1), 0.12),
             DropdownUnselected = c:Lerp(Color3.new(0, 0, 0), 0.05),
         })
-    end,
+    end),
 })
 
-SettingsTab:CreateColorPicker({
+mkPicker(SettingsTab, {
     Name = "Текст",
     Color = getgenv().RM_Theme.TextColor,
     Flag = "RM_ThemeText",
-    Callback = function(c)
+    Callback = colorCb("RM_ThemeText", function(c)
         setThemeKeys({
             TextColor = c,
             TabTextColor = c:Lerp(Color3.new(0, 0, 0), 0.25),
             SelectedTabTextColor = c,
         })
-    end,
+    end),
 })
+
+-- Конфиг Rayfield подгружается на +4с и зовёт ColorPicker:Set БЕЗ
+-- Callback (Toggle'ы он дёргает, пикеры — нет): GUI показывает
+-- сохранённый цвет, а G.*/RM_Theme остаются дефолтными до касания.
+-- Прогоняем сохранённые цвета через наши же колбэки.
+task.delay(5, function()
+    if getgenv().RM_Run ~= RUN_ID then return end
+    pcall(function()
+        local flags = Rayfield.Flags
+        if type(flags) ~= "table" then return end
+        for flag, fn in pairs(colorResync) do
+            local f = flags[flag]
+            if f and f.Color then
+                fn(f.Color)
+            end
+        end
+    end)
+end)
 
 pcall(function()
     SettingsTab:CreateButton({
@@ -3780,4 +3975,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.19 rayfield loaded | НОВОЕ: Паника-ТП (бинд G, случайное укрытие), Kid Detector (Ночь 3), Disable Static (глушение помех), BunkerRat в ESP мутанта, ТП-точки (Shack/FuseBox/Тыква/WorkerHead/AmmoPiles/Haunted Mansion) | РЕВИЗИЯ: guard'ы re-run в fuelPress/электрике (клик старым прогоном), кулдаун авто-заправки 3с (анти-пинг-понг Error 267), cellTries сбрасывается и тратится только при вставке, откат к origin при re-run, длинный кулдаун залипших целей, отписка Descendant-событий, стамина guard после discover, itemNames чистится, кеширование ESP-строк, состояние мутанта из 1-сек скана, Disable Static возвращает помехи при re-run | v4.17: Infinite Battery, Тревога кабины, бункер | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.20 rayfield loaded | РЕВИЗИЯ: при re-run гасится старая библиотека Rayfield (старые бинды больше не дёргают новые тоглы), noclip возвращает коллизии и самоотписывается, scare/cabin-коннекты самоотписываются, guard'ы в «дровах»/вентиляции/панике + откат RM_TP_Origin, стартовый сброс RM_NoStatic | ГЕЙТЫ ТП: сырые точки другой карты (плейс+высота) больше не кидают в пустоту | КУЛДАУН 2с на кнопки FireServer (анти-двойной клик) | КОНФИГ: уведомления только при реальном изменении, цвета пикеров докручиваются на +5с, ColorPicker создаётся безопасно (нет метода — пропуск, а не смерть скрипта) | v4.19: Паника-ТП (G), Kid Detector, Disable Static, бункер-ТП | ESP | Settings")
