@@ -2475,6 +2475,82 @@ else
     print("[RM] Окно Rayfield не найдено — ESC-защита для него не применяется")
 end
 
+-- ==== бинды Rayfield: «None» без ошибок + защита от захвата мыши ====
+-- 1) Триггер бинда в Rayfield: input.KeyCode == Enum.KeyCode[CurrentKeybind]
+--    на КАЖДОМ вводе (клавиша/клик мыши). Для "None" индекс
+--    Enum.KeyCode["None"] кидает ошибку (тот же механизм, что сломал
+--    ToggleUIKeybind в v4.22) → на каждый клик/нажатие — десяток
+--    ошибок в консоли. Лечим: создаём бинды с валидным "Unknown"
+--    (не совпадает ни с одним реальным KeyCode), а витрину (Text
+--    бокса) возвращаем в «None» свипом по GUI.
+-- 2) Режим захвата (клик по бинду-боксу) принимает MouseButton1/2 как
+--    обычный KeyCode: нахватанные кликами «мышиные» бинды делали так,
+--    что ЛЮБЫЙ левый/правый клик переключал тоглы. Sanitize конфига на
+--    +4.6с (после его загрузки) + кнопка «Сбросить бинды» в Settings.
+local keybindCfgs = {} -- все cfg наших CreateKeybind (санити/сброс)
+
+local function keybindSweep()
+    pcall(function()
+        if not eliteGui or not eliteGui.Parent then findEliteGui() end
+        if not eliteGui then return end
+        for _, d in ipairs(eliteGui:GetDescendants()) do
+            if d:IsA("TextBox") and d.Text == "Unknown" then
+                d.Text = "None" -- только витрина: в cfg остаётся Unknown
+            end
+        end
+    end)
+end
+
+local function shadowKeybind(tab)
+    local orig = tab.CreateKeybind
+    if type(orig) ~= "function" then return end
+    tab.CreateKeybind = function(self, cfg)
+        if type(cfg) == "table" then
+            if cfg.CurrentKeybind == "None" then
+                cfg.CurrentKeybind = "Unknown"
+            end
+            keybindCfgs[#keybindCfgs + 1] = cfg
+        end
+        return orig(self, cfg)
+    end
+end
+
+-- каждый Window:CreateTab проходит через обёртку — бинды чинятся во
+-- ВСЕХ вкладках, включая создаваемые позже
+do
+    local origTab = Window.CreateTab
+    if type(origTab) == "function" then
+        Window.CreateTab = function(self, ...)
+            local tab = origTab(self, ...)
+            pcall(shadowKeybind, tab)
+            return tab
+        end
+    end
+end
+
+-- витрина «Unknown» → «None»: когда GUI собран (+1с) и после загрузки
+-- сохранённого конфига (+4с, там Rayfield перезаписывает Text через Set)
+task.delay(1, function()
+    if getgenv().RM_Run ~= RUN_ID then return end
+    keybindSweep()
+end)
+task.delay(4.6, function()
+    if getgenv().RM_Run ~= RUN_ID then return end
+    -- старый конфиг мог сохранить "None" (теперь это ошибка ввода) или
+    -- мышиные бинды, пойманные кликом по боксу — чистим оба мусора
+    for _, cfg in ipairs(keybindCfgs) do
+        pcall(function()
+            local v = cfg.CurrentKeybind
+            if v == "None" or v == "ScrollWheel"
+                or (type(v) == "string"
+                    and string.sub(v, 1, 10) == "MouseButton") then
+                cfg:Set("Unknown")
+            end
+        end)
+    end
+    keybindSweep()
+end)
+
 -- плавный фиолетовый градиент на шапке окна (только фон, без иконок/текста)
 pcall(function()
     if not eliteGui then return end
@@ -3625,59 +3701,67 @@ Night2:CreateButton({
 G.RM_DupN = math.clamp(G.RM_DupN or 5, 1, 10) -- повторов (слайдер)
 local dupBusy = false
 
-Night2:CreateSlider({
-    Name = "Повторов дюпа",
-    Range = {1, 10},
-    Increment = 1,
-    CurrentValue = G.RM_DupN,
-    Flag = "RM_DupN",
-    Callback = function(v)
-        G.RM_DupN = v
-    end,
-})
-Night2:CreateButton({
-    Name = "Дюп предметов (серия воскрешений)",
-    Callback = function()
-        if dupBusy then
-            notify("Дюп: серия уже идёт", 2)
-            return
-        end
-        local n = math.clamp(G.RM_DupN or 5, 1, 10)
-        dupBusy = true
-        notify("Дюп: серия ×" .. n .. " — воскрешения каждые 2.5с", 3)
-        task.spawn(function()
-            for i = 1, n do
-                if getgenv().RM_Run ~= RUN_ID then return end
-                if i == 1 then
-                    -- свежий клик Revive мог недавно занять кулдаун —
-                    -- переждать без навязчивого notify от fireThrottle
-                    if fireAt["LoadCharacter"]
-                        and os.clock() - fireAt["LoadCharacter"] < 2 then
-                        task.wait(2.2)
+-- UI дюпа общий для всех трёх ночей (по просьбе юзера — «добавь во
+-- все ночи»). Без Flag: три слайдера с одним флагом конфликтуют бы в
+-- конфиге, а G.RM_DupN переживает re-run через getgenv (сброс —
+-- только перезапуском Roblox).
+local function makeDupUI(tab)
+    tab:CreateSection("Дюп предметов")
+    tab:CreateSlider({
+        Name = "Повторов дюпа",
+        Range = {1, 10},
+        Increment = 1,
+        CurrentValue = G.RM_DupN,
+        Callback = function(v)
+            G.RM_DupN = v
+        end,
+    })
+    tab:CreateButton({
+        Name = "Дюп предметов (серия воскрешений)",
+        Callback = function()
+            if dupBusy then
+                notify("Дюп: серия уже идёт", 2)
+                return
+            end
+            local n = math.clamp(G.RM_DupN or 5, 1, 10)
+            dupBusy = true
+            notify("Дюп: серия ×" .. n .. " — воскрешения каждые 2.5с", 3)
+            task.spawn(function()
+                for i = 1, n do
+                    if getgenv().RM_Run ~= RUN_ID then return end
+                    if i == 1 then
+                        -- свежий клик Revive мог недавно занять кулдаун —
+                        -- переждать без навязчивого notify от fireThrottle
+                        if fireAt["LoadCharacter"]
+                            and os.clock() - fireAt["LoadCharacter"] < 2 then
+                            task.wait(2.2)
+                            if getgenv().RM_Run ~= RUN_ID then return end
+                        end
+                    else
+                        task.wait(2.5)
                         if getgenv().RM_Run ~= RUN_ID then return end
                     end
-                else
-                    task.wait(2.5)
-                    if getgenv().RM_Run ~= RUN_ID then return end
+                    local ok, err = n2Fire("LoadCharacter")
+                    fireAt["LoadCharacter"] = os.clock() -- синк кулдауна
+                    print("[RM] Дюп " .. i .. "/" .. n .. ": "
+                        .. (ok and "отправлено" or tostring(err)))
+                    if not ok then
+                        notify("Дюп: ошибка на " .. i .. "/" .. n
+                            .. " — смотри консоль", 3)
+                        break
+                    end
                 end
-                local ok, err = n2Fire("LoadCharacter")
-                fireAt["LoadCharacter"] = os.clock() -- синк кулдауна
-                print("[RM] Дюп " .. i .. "/" .. n .. ": "
-                    .. (ok and "отправлено" or tostring(err)))
-                if not ok then
-                    notify("Дюп: ошибка на " .. i .. "/" .. n
-                        .. " — смотри консоль", 3)
-                    break
+                dupBusy = false
+                if getgenv().RM_Run == RUN_ID then
+                    notify("Дюп: серия ×" .. n
+                        .. " завершена — забери старый набор (Auto pickup)", 5)
                 end
-            end
-            dupBusy = false
-            if getgenv().RM_Run == RUN_ID then
-                notify("Дюп: серия ×" .. n
-                    .. " завершена — забери старый набор (Auto pickup)", 5)
-            end
-        end)
-    end,
-})
+            end)
+        end,
+    })
+end
+makeDupUI(Night1)
+makeDupUI(Night2)
 
 local Night3 = Window:CreateTab("Ночь 3", 4483362458)
 Night3:CreateSection("Аимбот")
@@ -3690,6 +3774,7 @@ Night3:CreateKeybind({
         G.RM_AimMonster = (on == true)
     end,
 })
+makeDupUI(Night3)
 
 -- новая вкладка «Воспоминания»: детект ребёнка и тревога кабины
 -- переехали сюда из «Ночи 3» (по просьбе юзера)
@@ -4376,6 +4461,27 @@ mkPicker(ESP, {
 -- ================= вкладка Settings (кастомизация темы) =================
 local SettingsTab = Window:CreateTab("Settings", 4483362458)
 
+-- восстановление после случайных захватов: клик по бинду-боксу ловит
+-- MouseButton1/2 как KeyCode — нахватал «мышиных» биндов, и левый клик
+-- начинает щёлкать тоглами. Одна кнопка возвращает всё в «None»
+-- (в cfg — валидный Unknown, в витрине — «None»)
+SettingsTab:CreateSection("Бинды")
+SettingsTab:CreateButton({
+    Name = "Сбросить все бинды (None)",
+    Callback = function()
+        local n = 0
+        for _, cfg in ipairs(keybindCfgs) do
+            pcall(function()
+                cfg:Set("Unknown")
+                n = n + 1
+            end)
+        end
+        keybindSweep()
+        notify("Бинды сброшены (" .. n .. ") — назначь заново кликом "
+            .. "по боксу бинда", 4)
+    end,
+})
+
 -- снимок дефолтной темы — для кнопки сброса
 local DEFAULT_THEME = {}
 for k, v in pairs(getgenv().RM_Theme) do
@@ -4557,4 +4663,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.25 rayfield loaded | НОВОЕ (v4.25): Дюп предметов (Ночь 2) — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.26 rayfield loaded | НОВОЕ (v4.26): бинды «None» больше не кидают ошибку на каждом вводе (под капотом валидный Unknown + свип витрины в «None»), автосанити пойманных кликами мышиных биндов + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
