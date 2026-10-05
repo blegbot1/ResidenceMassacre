@@ -2475,18 +2475,23 @@ else
     print("[RM] Окно Rayfield не найдено — ESC-защита для него не применяется")
 end
 
--- ==== бинды Rayfield: «None» без ошибок + защита от захвата мыши ====
--- 1) Триггер бинда в Rayfield: input.KeyCode == Enum.KeyCode[CurrentKeybind]
---    на КАЖДОМ вводе (клавиша/клик мыши). Для "None" индекс
---    Enum.KeyCode["None"] кидает ошибку (тот же механизм, что сломал
---    ToggleUIKeybind в v4.22) → на каждый клик/нажатие — десяток
---    ошибок в консоли. Лечим: создаём бинды с валидным "Unknown"
---    (не совпадает ни с одним реальным KeyCode), а витрину (Text
---    бокса) возвращаем в «None» свипом по GUI.
--- 2) Режим захвата (клик по бинду-боксу) принимает MouseButton1/2 как
---    обычный KeyCode: нахватанные кликами «мышиные» бинды делали так,
---    что ЛЮБЫЙ левый/правый клик переключал тоглы. Sanitize конфига на
---    +4.6с (после его загрузки) + кнопка «Сбросить бинды» в Settings.
+-- ==== бинды Rayfield: пустой бинд без ошибок и без ложных срабатываний ==
+-- Триггер Rayfield: (RF 3291) input.KeyCode == Enum.KeyCode[CurrentKeybind].
+-- Варианты «пустого» бинда и почему они НЕ работают:
+--  * "None" → Enum.KeyCode["None"] кидает ошибку на КАЖДОМ вводе
+--    (тот же механизм, что сломал ToggleUIKeybind в v4.22) — спам в консоли;
+--  * "Unknown" → ловушка v4.26: для кликов ЛКМ/ПКМ/колесо и тапов Roblox
+--    отдаёт input.KeyCode = Enum.KeyCode.Unknown (DevForum 4073073; и фильтр
+--    RF 3277 в режиме захвата доказывает, что такие события приходят) →
+--    КАЖДЫЙ клик совпадал и запускал все 10 биндов сразу;
+--  * "ButtonX" (геймпад) → валидный KeyCode (ошибок нет), но клавиатура,
+--    мышь и тап никогда не дают этот KeyCode — бинд по-настоящему пуст.
+--    Назначение реальной клавиши кликом по боксу работает как обычно.
+-- Витрину (Text бокса) возвращаем в «None» свипом — только по TextBox
+-- с именем "KeybindBox", чтобы не трогать поиск по вкладкам.
+-- Санити конфига (старые "None"/"Unknown"/мусор): проходы на +4.6/5.6/7.6с —
+-- запас против гонки с task.delay(4, LoadConfiguration) у Rayfield (RF 4258);
+-- кнопка «Сбросить бинды» в Settings.
 local keybindCfgs = {} -- все cfg наших CreateKeybind (санити/сброс)
 
 local function keybindSweep()
@@ -2494,8 +2499,11 @@ local function keybindSweep()
         if not eliteGui or not eliteGui.Parent then findEliteGui() end
         if not eliteGui then return end
         for _, d in ipairs(eliteGui:GetDescendants()) do
-            if d:IsA("TextBox") and d.Text == "Unknown" then
-                d.Text = "None" -- только витрина: в cfg остаётся Unknown
+            if d:IsA("TextBox") and d.Name == "KeybindBox" then
+                local t = d.Text
+                if t == "Unknown" or t == "ButtonX" then
+                    d.Text = "None" -- витрина: в cfg остаётся ButtonX
+                end
             end
         end
     end)
@@ -2507,7 +2515,7 @@ local function shadowKeybind(tab)
     tab.CreateKeybind = function(self, cfg)
         if type(cfg) == "table" then
             if cfg.CurrentKeybind == "None" then
-                cfg.CurrentKeybind = "Unknown"
+                cfg.CurrentKeybind = "ButtonX"
             end
             keybindCfgs[#keybindCfgs + 1] = cfg
         end
@@ -2528,28 +2536,33 @@ do
     end
 end
 
--- витрина «Unknown» → «None»: когда GUI собран (+1с) и после загрузки
--- сохранённого конфига (+4с, там Rayfield перезаписывает Text через Set)
+-- витрина → «None»: когда GUI собран (+1с)
 task.delay(1, function()
     if getgenv().RM_Run ~= RUN_ID then return end
     keybindSweep()
 end)
-task.delay(4.6, function()
-    if getgenv().RM_Run ~= RUN_ID then return end
-    -- старый конфиг мог сохранить "None" (теперь это ошибка ввода) или
-    -- мышиные бинды, пойманные кликом по боксу — чистим оба мусора
+-- санити старого конфига: Rayfield грузит его на +4с (RF 4258) и мог
+-- вернуть "None"/"Unknown" (ошибки ввода / ложные срабатывания) —
+-- чистим тремя проходами против гонки на медленном чтении файла
+local function keybindSanitize()
     for _, cfg in ipairs(keybindCfgs) do
         pcall(function()
             local v = cfg.CurrentKeybind
-            if v == "None" or v == "ScrollWheel"
+            if v == "None" or v == "Unknown" or v == "ScrollWheel"
                 or (type(v) == "string"
                     and string.sub(v, 1, 10) == "MouseButton") then
-                cfg:Set("Unknown")
+                cfg:Set("ButtonX")
             end
         end)
     end
     keybindSweep()
-end)
+end
+for _, at in ipairs({4.6, 5.6, 7.6}) do
+    task.delay(at, function()
+        if getgenv().RM_Run ~= RUN_ID then return end
+        keybindSanitize()
+    end)
+end
 
 -- плавный фиолетовый градиент на шапке окна (только фон, без иконок/текста)
 pcall(function()
@@ -4461,10 +4474,9 @@ mkPicker(ESP, {
 -- ================= вкладка Settings (кастомизация темы) =================
 local SettingsTab = Window:CreateTab("Settings", 4483362458)
 
--- восстановление после случайных захватов: клик по бинду-боксу ловит
--- MouseButton1/2 как KeyCode — нахватал «мышиных» биндов, и левый клик
--- начинает щёлкать тоглами. Одна кнопка возвращает всё в «None»
--- (в cfg — валидный Unknown, в витрине — «None»)
+-- ручной сброс всех биндов в «None»: одна кнопка обнуляет весь список
+-- (в cfg — валидный ButtonX, в витрине — «None»; старые мусорные значения
+-- из конфига тоже уходят в ButtonX через общий санити)
 SettingsTab:CreateSection("Бинды")
 SettingsTab:CreateButton({
     Name = "Сбросить все бинды (None)",
@@ -4472,7 +4484,7 @@ SettingsTab:CreateButton({
         local n = 0
         for _, cfg in ipairs(keybindCfgs) do
             pcall(function()
-                cfg:Set("Unknown")
+                cfg:Set("ButtonX")
                 n = n + 1
             end)
         end
@@ -4663,4 +4675,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.26 rayfield loaded | НОВОЕ (v4.26): бинды «None» больше не кидают ошибку на каждом вводе (под капотом валидный Unknown + свип витрины в «None»), автосанити пойманных кликами мышиных биндов + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.27 rayfield loaded | HOTFIX (v4.27): сентинел пустого бинда Unknown → ButtonX — Roblox отдаёт input.KeyCode = Enum.KeyCode.Unknown на клики мыши/колесо/тап (DevForum 4073073; фильтр RF 3277) → v4.26 запускал ВСЕ 10 биндов на каждый клик; свип витрины только по TextBox «KeybindBox», санити старого конфига — 3 прохода (4.6/5.6/7.6с) против гонки с LoadConfiguration | v4.26: бинды «None» (под капотом тогда был Unknown — ошибки ввода убраны), автосанити + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
