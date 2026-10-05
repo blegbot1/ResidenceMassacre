@@ -94,6 +94,33 @@
 - Abomination = Model **`BunkerRat`** (в ESP пока не заведено — имена монстров
   бункера не пересекаются с `*mutant*`)
 
+### Воспоминания / Хэллоуин 1 (Auto Farm, v4.33 — со скринов юзера)
+- `workspace.LivingRoomFurniture.Model.Fireplace` — база: точка стояния =
+  (камин → центр `LivingRoomFurniture`)*2.5, пол рейкастом, взгляд на камин
+- `workspace.CandyBowl` — миска: direct child `ClickDetector` (+ `Highlight`,
+  слоты конфет `1`/`2`/`3` (Mesh/Decal), `Bowl` с `OpenSound`); по юзеру
+  полной миски хватает ~3 раза, дальше — снова клик («наполнять», тот же CD)
+- `workspace.FrontDoor` — дочь `Hitbox` → `ClickDetector` = раздача конфеты
+  ребёнку; рядом `SoundPart.Growling` (наша «Тревога двери»), `CamPart`,
+  `RightDoor`, `RootPart`, `lookAt`
+- `workspace.BatteryCrate` — зарядка фонаря: direct `ClickDetector` (+ 4×
+  `Battery`, `Center`, `Main`) — кликать стоя рядом
+- Меню ребёнка «Open / Unnoticed» — GUI в `PlayerGui` (тексты, вероятно, EN;
+  ищем и EN «open», и RU «открыт», исключая «unnoticed»/«не замечен»/«ignore») —
+  кликаем через `getconnections(...MouseButton1Click)[1]:Fire()`, фолбэк
+  `VirtualInputManager:SendMouseButtonEvent(x, y, 0, game, 1)`
+- Клавиша **F** (фонарик) = `VirtualInputManager:SendKeyEvent(true/false,
+  Enum.KeyCode.F, false, game)` — VIM дают не все экзекуторы: если нет,
+  одноразовый notify и фарм просит жать F самому
+- Монстр: модель `Monster` (kind `memmonster` в ESP-кэше — позиция всегда
+  доступна); «у окна» = ≤12 стд от `BasePart`/`Model` с «window» в имени
+  (контейнер `Windows` из сканов исключён), кэш окон обновляется раз в 5 с
+- `workspace.FakeCandyBag` (ClickDetector, Union, Texture, DoritosBagDisplay)
+  — юзер прислал скрин, но в расшифровке не упомянул; в цикл фарма НЕ входит
+- Тогл без флага (OFF на старте), цикл под тройным guard: `RUN_ID` +
+  поколение `hfGen` + `hfBusy`/`pickupBusy`/`dupBusy`; вставка целиком в
+  `do…end` (лимит 200 локальных luac в main уже упирался)
+
 ## Источники (что портировано)
 
 | Источник | Что взяли |
@@ -155,6 +182,11 @@
 13. **Лимиты апгрейдов** — клиентская запись в ReplicatedStorage не
     реплицируется на сервер; кнопка «Бесплатные апгрейды (эксп.)» ставит
     атрибуты и честно сообщает, что сервер может цену валидировать сам.
+14. **`FakeCandyBag` в фарме Хэллоуина не используется** — юзер прислал скрин
+    объекта (`ClickDetector`, Union, Texture, DoritosBagDisplay, Main), но в
+    расшифровке миссии не сказал, за что он отвечает: в цикле только
+    `CandyBowl`/`FrontDoor.Hitbox`/`BatteryCrate`. Если на тесте выяснится, что
+    конфеты берутся из FakeCandyBag, а миска — только «наполняется», добавить.
 
 ## Правки-паттерны (повторять)
 
