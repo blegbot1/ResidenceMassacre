@@ -13,9 +13,11 @@
 
 -- Проверка, что это Residence Massacre: GameId покрывает все плейсы игры
 -- (лобби 14437001043, Ночь 1 14896802601, Ночь 2 16667550979 — из
--- script-sources/residence-massacre). RM_GAME_ID = 0 и пустой список = везде.
+-- script-sources/residence-massacre; бункер 100255403764514 — из
+-- Bunker Helper V5, на случай отдельного юниверса). RM_GAME_ID = 0 и
+-- пустой список = везде.
 local RM_GAME_ID = 4987467534
-local ONLY_PLACE_IDS = { 14437001043, 14896802601, 16667550979 }
+local ONLY_PLACE_IDS = { 14437001043, 14896802601, 16667550979, 100255403764514 }
 
 local Players = game:GetService("Players")
 local Lighting = game:GetService("Lighting")
@@ -581,9 +583,41 @@ task.spawn(function()
     end
 end)
 
+-- ===== Бесконечный заряд фонаря (Flashlight.Battery) =====
+-- Из gist «Night 3» (yancielsicard2-arch): NumberValue Battery лежит в
+-- Character.Flashlight или Backpack.Flashlight; держим на 130 (максимум
+-- из источника), запись только при отличии — без дёрганья каждые 0.5с.
+G.RM_InfBattery = false
+task.spawn(function()
+    while true do
+        if getgenv().RM_Run ~= RUN_ID then return end
+        if G.RM_InfBattery then
+            pcall(function()
+                local function lockB(root)
+                    local fl = root and root:FindFirstChild("Flashlight")
+                    local bat = fl and fl:FindFirstChild("Battery")
+                    if bat and bat:IsA("ValueBase") and typeof(bat.Value) == "number"
+                        and bat.Value < 130 then
+                        bat.Value = 130
+                    end
+                end
+                lockB(LP.Character)
+                lockB(LP.Backpack)
+            end)
+        end
+        task.wait(0.5)
+    end
+end)
+
 -- ===== Auto Scare: Ларри у окна → флешка (подключение в GUI «Ночь 1») =====
 G.RM_AutoScare = false
 local scareConn = nil
+
+-- Тревога кабины: слушает RemoteEvent OpenDoor (сервер шлёт OnClientEvent
+-- всем клиентам — читаем пассивно). Подключается тоглом в GUI «Ночь 3».
+G.RM_CabinAlert = false
+local cabinConn = nil
+local cabinGen = 0 -- поколение подписки (гонка выкл/пока ждём ремоут)
 
 -- Noclip: подключается тоглом в GUI (здесь только состояние)
 G.RM_Noclip = false
@@ -629,6 +663,7 @@ local function addMutant(m)
     local pg = ESPScreen
     if not pg then return end
     inCache[m] = true
+    print("[RM] Мутант появился: " .. m.Name)
 
     local hl = Instance.new("Highlight")
     hl.Name = "RM_MutantHL"
@@ -2265,6 +2300,17 @@ PlayerTab:CreateKeybind({
     end,
 })
 
+PlayerTab:CreateSection("Фонарь")
+-- без флага, как у Infinite O2: всегда стартует выключенным
+PlayerTab:CreateToggle({
+    Name = "Infinite Battery",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_InfBattery = v
+        notify("Infinite Battery: " .. (v and "ON" or "OFF"), 2)
+    end,
+})
+
 PlayerTab:CreateSection("Температура")
 local freezeToggle
 freezeToggle = PlayerTab:CreateToggle({
@@ -2704,6 +2750,46 @@ Night3:CreateKeybind({
     end,
 })
 
+Night3:CreateSection("Тревога кабины")
+Night3:CreateToggle({
+    Name = "Кто-то лезет в кабину",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_CabinAlert = v
+        cabinGen = cabinGen + 1
+        local gen = cabinGen
+        if cabinConn then cabinConn:Disconnect() cabinConn = nil end
+        if v then
+            task.spawn(function()
+                local rs = game:FindFirstChild("ReplicatedStorage")
+                local remotes = rs and rs:FindFirstChild("Remotes")
+                local rem = remotes and remotes:FindFirstChild("OpenDoor")
+                if not rem and remotes then
+                    rem = remotes:WaitForChild("OpenDoor", 10)
+                end
+                -- могли выключить/переключить тогл, пока ждали ремоут
+                if not (G.RM_CabinAlert and gen == cabinGen) then return end
+                if rem and rem:IsA("RemoteEvent") then
+                    cabinConn = rem.OnClientEvent:Connect(function(plr, door)
+                        if getgenv().RM_Run ~= RUN_ID then return end
+                        if plr == LP then return end -- свой вход — не тревога
+                        local who = (typeof(plr) == "Instance" and plr:IsA("Player"))
+                            and plr.Name or "Кто-то (возможно, бот)"
+                        local what = (typeof(door) == "Instance") and door.Name or "дверь"
+                        notify("Вторжение в кабину: " .. who
+                            .. " открывает «" .. what .. "»", 4)
+                    end)
+                    notify("Тревога кабины: ON", 3)
+                else
+                    notify("Тревога кабины: RemoteEvent OpenDoor не найден", 3)
+                end
+            end)
+        else
+            notify("Тревога кабины: OFF", 2)
+        end
+    end,
+})
+
 -- ================= вкладка ТП: точки из RM Helper =================
 -- Координаты/имена объектов — из RM Helper (rawscripts). Летим
 -- плавно через общий smoothTP (не рывком, как у них).
@@ -2874,6 +2960,94 @@ tpBtnNames("Жёлтая комната", {"YellowRoom", "Catwalk"}, Vector3.new
 TPTab:CreateSection("Bunker")
 tpBtnNames("Вход", {"Bunker", "BunkerDoor"}, Vector3.new(0, 5, 10))
 tpBtnNames("Внутри", {"BunkerInside", "BunkerRoom"}, Vector3.new(0, 5, 5))
+-- Плейс «The Bunker» (100255403764514) и структуры — из Bunker Helper
+-- V5 (pastefy). Сырые координаты работают ТОЛЬКО в этом плейсе, иначе
+-- улетаешь в пустоту чужой карты — стопим через inBunker().
+local function inBunker()
+    if game.PlaceId == 100255403764514 then return true end
+    notify("Это только в плейсе «The Bunker»", 3)
+    return false
+end
+local function bunkerBtn(title, cf)
+    TPTab:CreateButton({
+        Name = title,
+        Callback = function()
+            if inBunker() then tpToPoint(cf) end
+        end,
+    })
+end
+bunkerBtn("Бункер: сейф-плейс", CFrame.new(-25.3077145, 25.9999943, -150.490356,
+    -0.601064324, -1.01536057e-09, -0.799200654,
+    1.33655895e-08, 1, -1.13224878e-08,
+    0.799200654, -1.13224878e-08, -0.601064324))
+bunkerBtn("Бункер: конец (6 утра)", CFrame.new(16.2996006, 16.9999943, 68.173172,
+    -0.944833934, -4.709448836e-08, 0.327549726,
+    -3.33766472e-08, 1, 4.75014801e-08,
+    -0.327549726, 3.33766472e-08, -0.944833934))
+bunkerBtn("Бункер: вентиляция (ТП)", CFrame.new(68.3592224, 16.9999943, 74.6261444,
+    -0.999991238, -9.77371215e-08, 0.00418279972,
+    -9.77379742e-08, 1, 2.32150453e-13,
+    -0.00418279972, 4.09047467e-11, -0.999991238))
+for i = 1, 4 do
+    TPTab:CreateButton({
+        Name = "Бункер: грид " .. i,
+        Callback = function()
+            if not inBunker() then return end
+            local ok = pcall(function()
+                local pg = workspace:FindFirstChild("PowerGrids")
+                local g = pg and pg:FindFirstChild(tostring(i))
+                local door = g and g:FindFirstChild("Door", true)
+                if door and door:IsA("BasePart") then
+                    tpToPoint(CFrame.new(door.Position + Vector3.new(0, 5, 0)))
+                else
+                    error("дверь грида не найдена")
+                end
+            end)
+            if not ok then notify("Грид " .. i .. ": дверь не найдена", 3) end
+        end,
+    })
+end
+-- Чистка вентиляции: ТП к Debris → 7с кликов по ClickDetector-деталям
+-- (как автопровод, только кликаем) → возврат. pickupBusy — общая блокировка.
+TPTab:CreateButton({
+    Name = "Бункер: почистить вентиляцию",
+    Callback = function()
+        if not inBunker() then return end
+        if pickupBusy then notify("Уже занято (автозабор)", 2) return end
+        pickupBusy = true
+        task.spawn(function()
+            local ch = LP.Character
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            if not hrp then pickupBusy = false return end
+            local origin = hrp.CFrame -- точка возврата — как можно раньше
+            pcall(function()
+                smoothTP(hrp, CFrame.new(68.3592224, 16.9999943, 74.6261444,
+                    -0.999991238, -9.77371215e-08, 0.00418279972,
+                    -9.77379742e-08, 1, 2.32150453e-13,
+                    -0.00418279972, 4.09047467e-11, -0.999991238))
+            end)
+            task.wait(0.6)
+            local untilAt = os.clock() + 7
+            while os.clock() < untilAt do
+                if getgenv().RM_Run ~= RUN_ID then return end
+                pcall(function()
+                    local v = workspace:FindFirstChild("Ventilation")
+                    local d = v and v:FindFirstChild("Debris")
+                    if d and typeof(fireclickdetector) == "function" then
+                        for _, c in ipairs(d:GetChildren()) do
+                            local cd = c:FindFirstChildOfClass("ClickDetector")
+                            if cd then fireclickdetector(cd) end
+                        end
+                    end
+                end)
+                task.wait(0.15)
+            end
+            pcall(function() smoothTP(hrp, origin) end)
+            pickupBusy = false
+            notify("Вентиляция: debris обработан", 3)
+        end)
+    end,
+})
 
 -- ================= вкладка ESP (только ESP) =================
 local ESP = Window:CreateTab("ESP", 4483362458)
@@ -3110,4 +3284,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.15 rayfield loaded | РЕВИЗИЯ: починен .Position у ClickDetector (ящик/ключ/провод/капсула — электрика и Ночь 2 были мертвы) | GameId-проверка (лобби+ночи) | FusesFried-гейт | Infinite O2/Auto Scare/камин | ТП новая карта Н2 | страховка pickupBusy | вкладка Игрок | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.17 rayfield loaded | NEW: Infinite Battery (фонарь), Тревога кабины (OpenDoor), print спавна мутанта, бункер-кнопки (сейф/6 утра/вентиляция/гриды 1-4 + чистка) + гейт на плейс бункера | v4.16: Mutant ESP состояние ДОГОНЯЕТ/ИЩЕТ | РЕВИЗИЯ v4.15: .Position у ClickDetector, GameId, FusesFried-гейт | Infinite O2 (V) / Noclip (F) / Auto Scare / камин | Ночь 2: капсула+ремоуты | ТП новая карта Н2 | ESP | Settings")

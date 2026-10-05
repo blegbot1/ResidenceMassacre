@@ -11,6 +11,7 @@
 | Плейс — лобби | `14437001043` |
 | Плейс — Ночь 1 | `14896802601` |
 | Плейс — Ночь 2 | `16667550979` |
+| Плейс — The Bunker | `100255403764514` (из Bunker Helper V5; в `ONLY_PLACE_IDS` на случай отдельного юниверса) |
 
 В коде: `RM_GAME_ID` + `ONLY_PLACE_IDS` (оба выключены = старт в любой игре).
 
@@ -55,6 +56,25 @@
 - Любой `ClickDetector` / `ProximityPrompt` в workspace = предмет (Item ESP)
 - Топливо/газ: ValueBase с `"fuel"`/`"gas"` в имени → потом атрибут → потом текст
 
+### Фонарь / кабины (Ночь 3, gist yancielsicard2-arch)
+- `Character.Flashlight.Battery` или `Backpack.Flashlight.Battery` — NumberValue,
+  максимум 130 (Infinite Battery держит `Value < 130 → 130`)
+- `ReplicatedStorage.Remotes.OpenDoor` — RemoteEvent; `OnClientEvent(plr, door)`:
+  **plr == LocalPlayer → своё открытие, не тревога**; иначе имя игрока + `door.Name`
+- Имена папок Ночь 3: `workspace.Zombies`, `Halloween.Pumpkins`, `JerryCans`,
+  `AmmoPiles`, `Cabins`, `ItemSpots`, `Shotgun`; модель `GhostChild`,
+  часть `WorkerHead`; ремоут `GiveItem` (**не используем** — это выдача предметов)
+
+### Бункер (место `100255403764514`, Bunker Helper V5)
+- `workspace.Generator` (ClickDetector), `workspace.JerryCans.JerryCan` —
+  заправка та же, что и в Ночи 1 (наш Auto fuel подхватывает)
+- `workspace.Ventilation.Debris` — дети с `ClickDetector`: кликать ~7с (чистка)
+- `workspace.PowerGrids["1".."4"].Door` (BasePart, искать recursive) — ТП к двери
+- Сырые координаты: сейф-плейс `-25.31, 26.0, -150.49`; конец (6 утра)
+  `16.30, 17.0, 68.17`; вентиляция `68.36, 17.0, 74.63`; генератор `-31.41, 13.4, -155.57`
+- Abomination = Model **`BunkerRat`** (в ESP пока не заведено — имена монстров
+  бункера не пересекаются с `*mutant*`)
+
 ## Источники (что портировано)
 
 | Источник | Что взяли |
@@ -62,8 +82,11 @@
 | RM Helper (rawscripts) | ~60 ТП-точек (дом/фабрика/лагерь/Spirit/Mansion/Bunker) |
 | RMxploitt (GitHub) | клик `ClickWire`, Anti-Freeze, доставки, электрика-логика |
 | script-sources/residence-massacre (GitHub, roblox-ts) | GameId/плейсы, `FusesFried`, `Sparkles.Enabled`, шкала топлива, `Config.*` мутанта |
+| Bunker Helper V5 (pastefy `moI6tr9z`, читаемый) | плейс бункера, `Ventilation.Debris`, `PowerGrids[i].Door`, `BunkerRat`, сырые CF (сейф/конец/вент/ген) |
+| gist «Night 3» (yancielsicard2-arch, читаемый, лёгкая арифметическая обфускация) | `Flashlight.Battery`→130, `OpenDoor` (тревога кабины), папки Ночи 3 (`Zombies/Halloween.Pumpkins/AmmoPiles/Cabins/ItemSpots`) |
+| ScriptBlox | **челлендж решён**: HMAC-SHA256(cookie=`ScR1ptBlx`, данные=`encodeURIComponent(UA)+time`) → cookie `__scriptblox_validation=?token...` + `__scriptblox_ua_`; API **`/api/script/<slug>`** отдаёт JSON с кодом; описания фич вытаскиваются с карточек. Коды большинства скриптов — под логином/обфусцированы |
 | pastefy / roscripts / MyzorithHub / Spirit Helper | только реклама или VM-обфускация — **брать нечего** |
-| scriptblox / rscripts.net | HTTP 403 (JS-челлендж) |
+| rscripts.net | HTTP 403 |
 
 ## Известные несделанное (осознанно)
 
