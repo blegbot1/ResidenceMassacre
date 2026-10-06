@@ -241,18 +241,38 @@ pcall(function()
 end)
 G.RM_LevHum = nil
 G.RM_Levitate = false
--- 2g) «Духовный помощник» / Теди-медведь (v4.64): тогл всегда OFF на старте, а медведь мог
--- остаться у ног прошлого персонажа (следовал локально) — возвращаем
--- на исходную точку, запомненную при включении
+-- 2g) «Духовный помощник» (v4.64–v4.66): все тоглы OFF на старте;
+-- мишки могли остаться у ног прошлого персонажа (следовали локально) —
+-- возвращаем на исходные точки (и старый одиночный токен v4.64/65, и
+-- таблицу v4.66); если прошлый прогон спрятал в кровати — только
+-- подсказка в консоль (серверных действий на старте нет)
 pcall(function()
-    local cf = G.RM_TeddyCF
-    local bear = cf and workspace:FindFirstChild("Teddy bear", true)
-    if bear then
-        bear:PivotTo(cf)
+    local cfs = G.RM_TeddyCFs
+    if typeof(cfs) == "table" then
+        for nm, cf in pairs(cfs) do
+            local bear = workspace:FindFirstChild(nm, true)
+            if bear and typeof(cf) == "CFrame" then
+                bear:PivotTo(cf)
+            end
+        end
+    end
+    local cf1 = G.RM_TeddyCF
+    if typeof(cf1) == "CFrame" then
+        local bear = workspace:FindFirstChild("Teddy bear", true)
+        if bear then bear:PivotTo(cf1) end
     end
 end)
+if G.RM_BedState == true then
+    print("[RM] кровать: прошлый прогон спрятал тебя — жми «Спрятаться/Выйти» или выйди сам")
+end
+G.RM_TeddyCFs = nil
 G.RM_TeddyCF = nil
 G.RM_TeddyFollow = false
+G.RM_MemFarm = false
+G.RM_Sanity100 = false
+G.RM_Saver = false
+G.RM_MemDanger = false
+G.RM_BedState = false
 -- 3) Disable Static: новый запуск всегда со стартовым OFF
 G.RM_NoStatic = false
 pcall(function()
@@ -4499,9 +4519,11 @@ local fireAt = G.RM_FireAt or {}
 G.RM_FireAt = fireAt
 -- silent=true — для автомата (радио/флешка/поездки фарма): иначе каждая
 -- пропущенная попытка сыпала бы «Подожди пару секунд» в notify
-local function fireThrottle(key, silent)
+-- minGap (v4.66): свой кулдаун для ключа — слайдер «Интервал авто-клика»
+-- в «Духовном помощнике»; без параметра прежние 2с (кик-защита)
+local function fireThrottle(key, silent, minGap)
     local now = os.clock()
-    if fireAt[key] and now - fireAt[key] < 2 then
+    if fireAt[key] and now - fireAt[key] < (minGap or 2) then
         if not silent then
             notify("Подожди пару секунд между нажатиями (кулдаун 2с)", 1)
         end
@@ -5137,6 +5159,428 @@ makeDupUI(Night3)
 -- новая вкладка «Воспоминания»: детект ребёнка и тревога кабины
 -- переехали сюда из «Ночи 3» (по просьбе юзера)
 local MemoriesTab = Window:CreateTab("Воспоминания", 4483362458)
+-- ================ «Духовный помощник» (v4.66, НОВАЯ карта) ================
+-- Новая карта-воспоминание «Духовный помощник» (по скринам/просьбам юзера).
+-- Секция — ПЕРВОЙ в «Воспоминаниях» («мишку и часы наверху»):
+-- 1) авто-фарм: обходит предметы (Teddy bear, Teddy bear2, часы, Radio,
+--    Lamp) и кликает их ClickDetector; юзер: «все предметы надо чтобы ты
+--    был рядом» — перед кликом встаём рядом (луч вниз → пол → smoothTP);
+-- 2) слайдер интервала клика 0.5–5с (без Flag — живёт до перезапуска
+--    Roblox); клики реже 0.5с не даём (FireServer быстрее 2с = Error 267);
+-- 3) «Теди со мной» — за ОБИМИ мишками (Teddy bear + Teddy bear2) + клик;
+-- 4) «Спасение» — следит за Progress у входов (Monster/Window/Progress,
+--    MonsterModel2/Progress и т.д.): рост = «монстр ломится», дальше
+--    порога (0.8 либо 80 — масштаб значения) = «прячься» → сам в кровать
+--    (Bed/Detectors/Detector1) и ждёт сброса прогресса; спокойно >3с →
+--    выход (ремоут Unhide, фолбэк — клик детектора). Ловушка опасности
+--    снимается ТОЛЬКО сбросом Progress — посреди атаки не выкидывает;
+-- 5) кнопка «Спрятаться/Выйти» — вручную, когда нужно;
+-- 6) «Рассудок 100%» — Humanoid.Sanity = 100 (сервер может перезаписать,
+--    юзер: «можно попробовать» — пробуем).
+-- Старт все тоглы OFF; на старте серверных действий нет (блок 2g).
+G.RM_MemFarm = false
+G.RM_Sanity100 = false
+G.RM_Saver = false
+G.RM_MemDanger = false
+G.RM_BedState = false
+G.RM_MemInterval = G.RM_MemInterval or 2 -- слайдер переживает re-run
+G.RM_TeddyCFs = {} -- исходные точки мишек (имя → CFrame), для отката
+
+-- пол под предметом: луч вниз от предмета+10; возврат CF для корня
+G.RM_MemFloorCF = function(pos)
+    local cf
+    pcall(function()
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = { LP.Character }
+        local hit = workspace:Raycast(pos + Vector3.new(0, 10, 0),
+            Vector3.new(0, -60, 0), params)
+        if hit then
+            cf = CFrame.new(hit.Position + Vector3.new(0, 3, 0))
+        end
+    end)
+    if not cf then
+        cf = CFrame.new(pos + Vector3.new(2, 0, 2))
+    end
+    return cf
+end
+
+-- часы: имя неизвестно (юзер скрин не присылал) — ищем по имени среди
+-- объектов с ClickDetector: Clock/Alarm/Watch/Часы/Будильник
+G.RM_MemFindClock = function()
+    local found
+    pcall(function()
+        for _, o in ipairs(workspace:GetDescendants()) do
+            local nm = o.Name
+            local low = string.lower(nm)
+            if string.find(low, "clock", 1, true)
+                or string.find(low, "alarm", 1, true)
+                or string.find(low, "watch", 1, true)
+                or string.find(nm, "Час", 1, true)
+                or string.find(nm, "час", 1, true)
+                or string.find(nm, "Будил", 1, true) then
+                if o:FindFirstChild("ClickDetector", true) then
+                    found = o
+                    break
+                end
+            end
+        end
+    end)
+    return found
+end
+
+-- кровать: спрятан ли (Hidden — Bool/Number, иначе наше последнее мнение)
+G.RM_BedIsHidden = function()
+    local bed = workspace:FindFirstChild("Bed", true)
+    local hid = bed and bed:FindFirstChild("Hidden")
+    if hid and hid:IsA("BoolValue") then return hid.Value end
+    if hid and hid:IsA("NumberValue") then return hid.Value ~= 0 end
+    return G.RM_BedState == true
+end
+
+-- спрятаться: встать у кровати (force — цель как раз укрытие, окно
+-- паники не должно нас держать снаружи) и кликнуть Detector1
+G.RM_BedHide = function()
+    if G.RM_BedIsHidden() then return end
+    if not fireThrottle("RMBed", true) then return end
+    pcall(function()
+        local ch = LP.Character
+        local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+        local bed = workspace:FindFirstChild("Bed", true)
+        if not (hrp and bed) then return end
+        local pos = bed:GetPivot().Position
+        if not smoothTP(hrp, G.RM_MemFloorCF(pos), nil, true) then
+            return
+        end
+        local det = bed:FindFirstChild("Detector1", true) or bed
+        local cd = det and det:FindFirstChild("ClickDetector", true)
+        if cd then
+            fireclickdetector(cd)
+            G.RM_BedState = true
+            print("[RM] кровать: спрятался (Detector1)")
+        end
+    end)
+end
+
+-- выйти: ремоут Unhide (юзер предлагал ремоуты), фолбэк — клик детектора
+G.RM_BedUnhide = function()
+    if not G.RM_BedIsHidden() then return end
+    if not fireThrottle("RMBedUn", true) then return end
+    local fired = false
+    pcall(function()
+        local rs = game:FindFirstChild("ReplicatedStorage")
+        local remotes = rs and rs:FindFirstChild("Remotes")
+        local rem = remotes and remotes:FindFirstChild("Unhide")
+        if rem and rem:IsA("RemoteEvent") then
+            rem:FireServer()
+            fired = true
+        end
+    end)
+    if not fired then
+        pcall(function()
+            local bed = workspace:FindFirstChild("Bed", true)
+            local det = bed and bed:FindFirstChild("Detector1", true)
+            local cd = det and det:FindFirstChild("ClickDetector", true)
+            if cd then fireclickdetector(cd) end
+        end)
+    end
+    G.RM_BedState = false
+    print("[RM] кровать: вышел ("
+        .. (fired and "ремоут Unhide" or "клик детектора") .. ")")
+end
+
+MemoriesTab:CreateSection("Духовный помощник")
+MemoriesTab:CreateToggle({
+    Name = "Авто-фарм воспоминаний (обходит предметы и кликает)",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_MemFarm = v
+        if v then
+            notify("Фарм воспоминаний: ON — обойду мишек/часы/радио/лампу, встану рядом и накликаю", 4)
+            task.spawn(function()
+                local names = { "Teddy bear", "Teddy bear2",
+                    "Radio", "Lamp" }
+                local clockName
+                local clockWarned = false
+                while G.RM_MemFarm and getgenv().RM_Run == RUN_ID do
+                    if not clockName then
+                        local clk = G.RM_MemFindClock()
+                        if clk then
+                            clockName = clk.Name
+                            print("[RM] фарм: часы найдены — " .. clockName)
+                        elseif not clockWarned then
+                            clockWarned = true
+                            print("[RM] фарм: часы не найдены (Clock/Часы/Будильник?) — назови имя объекта")
+                        end
+                    end
+                    local cycle = {}
+                    for _, nm in ipairs(names) do
+                        cycle[#cycle + 1] = nm
+                    end
+                    if clockName then
+                        cycle[#cycle + 1] = clockName
+                    end
+                    local found = false
+                    for _, nm in ipairs(cycle) do
+                        while G.RM_MemFarm and G.RM_MemDanger do
+                            task.wait(0.5) -- опасность: нас прячет «Спасение»
+                        end
+                        if not (G.RM_MemFarm
+                            and getgenv().RM_Run == RUN_ID) then
+                            break
+                        end
+                        local itemOk = pcall(function()
+                            local obj = workspace:FindFirstChild(nm, true)
+                            if not obj then return end
+                            found = true
+                            -- встать РЯДОМ: паника блокирует не-force TP —
+                            -- пробуем до 5 раз
+                            local gotThere = false
+                            for _ = 1, 5 do
+                                if not (G.RM_MemFarm and getgenv().RM_Run == RUN_ID) then return end
+                                while G.RM_MemFarm and G.RM_MemDanger do task.wait(0.5) end
+                                local o = workspace:FindFirstChild(nm, true)
+                                local ch = LP.Character
+                                local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+                                if o and hrp then
+                                    local p = (o:IsA("Model")
+                                        and o:GetPivot()
+                                        or CFrame.new(o.Position)).Position
+                                    if smoothTP(hrp, G.RM_MemFloorCF(p), nil, false) then
+                                        gotThere = true
+                                        break
+                                    end
+                                end
+                                task.wait(1)
+                            end
+                            if not gotThere then return end
+                            task.wait(0.7)
+                            for _ = 1, 2 do
+                                if not (G.RM_MemFarm and getgenv().RM_Run == RUN_ID) then return end
+                                local o = workspace:FindFirstChild(nm, true)
+                                local cd = o and o:FindFirstChild("ClickDetector", true)
+                                if cd and fireThrottle("RMMem", true, G.RM_MemInterval) then
+                                    fireclickdetector(cd)
+                                end
+                                task.wait(G.RM_MemInterval or 2)
+                            end
+                        end)
+                        if not itemOk then
+                            print("[RM] фарм: ошибка предмета «" .. nm .. "» — пропускаю")
+                        end
+                    end
+                    if not found then
+                        print("[RM] фарм: предметы не найдены (Teddy bear / Teddy bear2 / Radio / Lamp / часы) — ты на карте «Духовный помощник»?")
+                        task.wait(3)
+                    end
+                    task.wait(1)
+                end
+            end)
+        else
+            notify("Фарм воспоминаний: OFF", 2)
+        end
+    end,
+})
+MemoriesTab:CreateSlider({
+    Name = "Интервал авто-клика (сек)",
+    Range = {0.5, 5},
+    Increment = 0.1,
+    Suffix = " с",
+    CurrentValue = G.RM_MemInterval,
+    Callback = function(v)
+        G.RM_MemInterval = v
+    end,
+})
+MemoriesTab:CreateToggle({
+    Name = "Теди со мной (следовать + авто-клик)",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_TeddyFollow = v
+        if v then
+            notify("Теди: ON — оба мишка идут за тобой и кликаются сами", 3)
+            task.spawn(function()
+                while G.RM_TeddyFollow and getgenv().RM_Run == RUN_ID do
+                    pcall(function()
+                        local ch = LP.Character
+                        local hrp = ch
+                            and ch:FindFirstChild("HumanoidRootPart")
+                        if not hrp then return end
+                        local offs = { { 0, -2 }, { 1.5, -4 } }
+                        for i, nm in ipairs(
+                            { "Teddy bear", "Teddy bear2" }) do
+                            local bear = workspace:FindFirstChild(nm, true)
+                            if bear then
+                                if G.RM_TeddyCFs[nm] == nil then
+                                    G.RM_TeddyCFs[nm] = bear:GetPivot()
+                                end
+                                local o = offs[i] or { 0, -2 }
+                                bear:PivotTo(hrp.CFrame
+                                    * CFrame.new(o[1], -1.5, o[2]))
+                                local cd = bear:FindFirstChild(
+                                    "ClickDetector", true)
+                                if cd and fireThrottle("RMTeddy", true,
+                                    G.RM_MemInterval) then
+                                    fireclickdetector(cd)
+                                end
+                            end
+                        end
+                    end)
+                    task.wait(0.3)
+                end
+            end)
+        else
+            -- циклу дожить тик (0.3с), потом возврат мишек домой
+            task.spawn(function()
+                task.wait(0.45)
+                pcall(function()
+                    for nm, cf in pairs(G.RM_TeddyCFs or {}) do
+                        local bear = workspace:FindFirstChild(nm, true)
+                        if bear and typeof(cf) == "CFrame" then
+                            bear:PivotTo(cf)
+                        end
+                    end
+                    G.RM_TeddyCFs = {}
+                end)
+            end)
+            notify("Теди: OFF", 2)
+        end
+    end,
+})
+MemoriesTab:CreateToggle({
+    Name = "Спасение: тревога прогресса + прятка в кровати",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_Saver = v
+        if v then
+            notify("Спасение: ON — слежу за Progress монстра; опасно → прячу в кровати", 4)
+            task.spawn(function()
+                local last = {}    -- прошлое значение каждого Progress
+                local epAnn = {}   -- рост эпизода объявляли / видели
+                local latch = {}   -- опасность эпизода: прячемся
+                local seenAt = {}  -- когда в последний раз видели объект
+                local calmAt       -- когда стало спокойно
+                while G.RM_Saver and getgenv().RM_Run == RUN_ID do
+                    pcall(function()
+                        local now = os.clock()
+                        for _, o in ipairs(workspace:GetDescendants()) do
+                            if o.Name == "Progress"
+                                and o:IsA("ValueBase") then
+                                local num = tonumber(o.Value)
+                                if num then
+                                    seenAt[o] = now
+                                    local prev = last[o]
+                                    local route = (o.Parent
+                                        and o.Parent.Name) or "?"
+                                    local disp = num <= 1
+                                        and math.floor(num * 100)
+                                        or math.floor(num)
+                                    -- рост = монстр взялся за вход
+                                    if prev ~= nil and num > prev + 1e-4 then
+                                        if not epAnn[o] then
+                                            epAnn[o] = true
+                                            notify("⚠ Монстр ломится через «"
+                                                .. route .. "» (прогресс "
+                                                .. disp .. "%)", 4)
+                                        end
+                                    end
+                                    if prev ~= nil and num < prev - 1e-4 then
+                                        -- сбросился — эпизод кончился
+                                        last[o] = nil
+                                        epAnn[o] = nil
+                                        latch[o] = nil
+                                        calmAt = now
+                                    else
+                                        last[o] = num
+                                    end
+                                    -- ловушка: рост уже видели И порог
+                                    -- пройден (0.8 = масштаб 0..1,
+                                    -- 80 = масштаб 0..100)
+                                    if epAnn[o] and not latch[o]
+                                        and (num >= 80 or num >= 0.8) then
+                                        latch[o] = true
+                                        notify("‼ Прячься! «" .. route
+                                            .. "» прогресс " .. disp
+                                            .. "% — сейчас убьёт!", 6)
+                                    end
+                                end
+                            end
+                        end
+                        -- объект исчез (стриминг/деспавн) — чистим
+                        for o in pairs(latch) do
+                            if not seenAt[o] or now - seenAt[o] > 5 then
+                                latch[o] = nil
+                                epAnn[o] = nil
+                                last[o] = nil
+                                seenAt[o] = nil
+                            end
+                        end
+                        for o in pairs(last) do
+                            if not seenAt[o] or now - seenAt[o] > 5 then
+                                last[o] = nil
+                                epAnn[o] = nil
+                                seenAt[o] = nil
+                            end
+                        end
+                        local danger = next(latch) ~= nil
+                        G.RM_MemDanger = danger
+                        if danger then
+                            calmAt = nil
+                            G.RM_BedHide()
+                        elseif calmAt == nil then
+                            calmAt = now
+                        elseif now - calmAt > 3 and G.RM_BedIsHidden() then
+                            G.RM_BedUnhide()
+                        end
+                    end)
+                    task.wait(0.5)
+                end
+                G.RM_MemDanger = false
+            end)
+        else
+            G.RM_MemDanger = false
+            notify("Спасение: OFF", 2)
+        end
+    end,
+})
+MemoriesTab:CreateButton({
+    Name = "Спрятаться/Выйти (кровать)",
+    Callback = function()
+        if getgenv().RM_Run ~= RUN_ID then return end
+        pcall(function()
+            if G.RM_BedIsHidden() then
+                G.RM_BedUnhide()
+            else
+                G.RM_BedHide()
+            end
+        end)
+    end,
+})
+MemoriesTab:CreateToggle({
+    Name = "Рассудок 100%",
+    CurrentValue = false,
+    Callback = function(v)
+        G.RM_Sanity100 = v
+        if v then
+            notify("Рассудок: держу 100% (сервер может перезаписывать — как выйдет)", 3)
+            task.spawn(function()
+                while G.RM_Sanity100 and getgenv().RM_Run == RUN_ID do
+                    pcall(function()
+                        local ch = LP.Character
+                        local hum = ch
+                            and ch:FindFirstChildOfClass("Humanoid")
+                        local sv = hum and hum:FindFirstChild("Sanity")
+                        if sv and sv:IsA("NumberValue") then
+                            sv.Value = 100
+                        end
+                    end)
+                    task.wait(0.5)
+                end
+            end)
+        else
+            notify("Рассудок: OFF", 2)
+        end
+    end,
+})
 MemoriesTab:CreateSection("Тревога кабины")
 G.RM_CabinToggle = MemoriesTab:CreateToggle({
     Name = "Кто-то лезет в кабину",
@@ -5342,68 +5786,6 @@ task.spawn(function()
         task.wait(1)
     end
 end)
-
--- «Духовный помощник» (v4.64–v4.65, по запросу юзера; имя воспоминания
--- из игры, юзер поправил: «воспоминание называется духовный помощник»):
--- «чтобы Teddy bear постоянно был
--- со мной и я на него постоянно жал — ну на ClickDetector».
--- 1) следуем: модель телепортируется к персонажу каждые 0.3с (локально,
---    PivotTo, 2 стда поперёд); исходную точку помним в G.RM_TeddyCF —
---    возвращаем при выключении и на старте после re-run (блок 2g).
--- 2) авто-клик: клик по ClickDetector через ОБЩИЙ fireThrottle
---    (кулдаун 2с — два FireServer быстрее 2с = Error 267).
--- Старт всегда выкл; клик клиентский (fireclickdetector) — сервер его
--- принимает по позиции медведя на сервере: если уйдёшь далеко от его
--- точки спавна и клик не будет проходить — скажи, разберём.
-G.RM_TeddyFollow = false
-G.RM_TeddyCF = nil
-MemoriesTab:CreateSection("Духовный помощник")
-MemoriesTab:CreateToggle({
-    Name = "Теди со мной (следовать + авто-клик)",
-    CurrentValue = false,
-    Callback = function(v)
-        G.RM_TeddyFollow = v
-        if v then
-            notify("Теди: ON — медведь идёт за тобой и кликается сам (раз в 2с)", 3)
-            task.spawn(function()
-                while G.RM_TeddyFollow and getgenv().RM_Run == RUN_ID do
-                    pcall(function()
-                        local ch = LP.Character
-                        local hrp = ch
-                            and ch:FindFirstChild("HumanoidRootPart")
-                        local bear = workspace:FindFirstChild(
-                            "Teddy bear", true)
-                        if not (hrp and bear) then return end
-                        -- исходную точку запоминаем один раз (для отката)
-                        if G.RM_TeddyCF == nil then
-                            G.RM_TeddyCF = bear:GetPivot()
-                        end
-                        bear:PivotTo(hrp.CFrame * CFrame.new(0, -1.5, -2))
-                        local cd = bear:FindFirstChild("ClickDetector")
-                        if cd and fireThrottle("RMTeddy", true) then
-                            fireclickdetector(cd)
-                        end
-                    end)
-                    task.wait(0.3)
-                end
-            end)
-        else
-            -- даём циклу дожить последний тик (0.3с), потом возврат
-            task.spawn(function()
-                task.wait(0.45)
-                pcall(function()
-                    local bear = workspace:FindFirstChild(
-                        "Teddy bear", true)
-                    if bear and G.RM_TeddyCF then
-                        bear:PivotTo(G.RM_TeddyCF)
-                    end
-                end)
-                G.RM_TeddyCF = nil
-            end)
-            notify("Теди: OFF", 2)
-        end
-    end,
-})
 
 -- «Monster» (Воспоминания) светится от ОБЩЕГО тогла Monster ESP во вкладке
 -- ESP (v4.32): юзер попросил «1 нажать и всё подсвечивалось» — отдельный
@@ -6432,4 +6814,4 @@ pcall(function()
 end)
 
 
-print("[RESIDENCE MASSACRE] v4.65 rayfield loaded | v4.65: Секция с Теди переименована в «Духовный помощник» — так это воспоминание называется в игре (тогл «Теди со мной (следовать + авто-клик)» и логика без изменений) | v4.64: «Теди-медведь» во вкладке «Воспоминания» — тогл «Теди со мной (следовать + авто-клик)»: модель Teddy bear телепортируется к персонажу каждые 0.3с (2 стда поперёд, локально, исходная точка в G.RM_TeddyCF — возврат при выключении и на старте, блок 2g) и её ClickDetector жмётся сам через общий fireThrottle (кулдаун 2с = анти-Error 267); старт выкл | v4.63: Auto Farm УДАЛЁН из «Воспоминаний» целиком по запросу юзера — тогл «Auto Farm (камин/конфеты/дверь/фонарь)», кнопка «Проверить объекты фарма» и весь цикл (~780 строк: поездки hfTrip, меню стука, раздача конфет, окно → F, зарядка батареи, все hf*-функции и G.RM_Hf*-токены). Во вкладке «Воспоминания» остались: Тревога кабины, Тревога двери, Kid Detector; лимит локальных luac снова свободен | v4.62: Тогл «Левитация (в воздухе, не падаю)» во вкладке Игрок — (1) Freefall выключен: персонаж не уходит в падение и не обвисает в «регдолл»-позу, стоит в воздухе; (2) пола под ногами нет (>8 стд) — гасим вертикаль (гравитация кадра = dt) стоим/идём в воздухе, горизонт не трогаем (TP walk работает); прыжки с земли не задеты (пол в 8 стд), труп при смерти отдаём игре; старт выкл, при выключении/re-run Freefall возвращается (блок 2f) | v4.61: (1) Двери: скрипт собирает ВСЕ модели с «door» в имени карты — посетителя (ребёнок/монстр) ищем у любой двери (юзер показал Hitbox в RightDoor — раньше смотрели только FrontDoor и писали «пусто»); раздача конфеты едет к хитбоксу той двери, где видели ребёнка (G.RM_HfGrantBox), клик по ClickDetector — рекурсивно. (2) Перед «Открыть» обязательна конфета: если взятие сорвалось — не жмём (раньше код всё равно жал «Открыть»), повтор взятия не чаще раза в 6с. (3) Окно: F жмётся ВСЕГДА — севшая батарея больше не блокирует пугание монстра («скрипт пропустил монстра»), зарядка отдельным шагом с кулдауном 20с. (4) Диагностика: осмотр двери пишет состояние меню; раз за стук — имена моделей у двери, если посетитель не распознан; кнопка «Проверить объекты фарма» показывает список всех дверей | v4.60: (1) Крыша устранена: луч пола стартовал с +40 стд над точкой — в доме с потолком начало было НАД крышей, первое попадание = крыша и точка = крыша+3 («телепортует на крышу»); теперь origin на +2 (повтор +8) — только внутри комнаты, без пола выезд не начинается. (2) Живой монстр: трекер движения — модель на месте спавна стоит неподвижно и НЕ считается монстром (hfAtWindow требует движения за последние 30с: влёт/походка = жив, парковка = молчит). (3) Диагностика: кнопка «Проверить объекты фарма» пишет «двигался N с назад/не двигался» и #Progress из структуры модели | v4.59: Auto Farm — (1) без «регдолла»: пол под точкой обязателен (широкий повтор луча; без пола выезд не начинается вместо посадки в мид-эйр), после каждого ТП — ожидание приземления с посадкой при затяжном падении; (2) выезды и возвраты спокойнее — 180 стд/с вместо общих 500 («очень быстро двигаюсь»); (3) анти-пинг-понг: выезд на зарядку батареи не чаще раза в 20с — раньше при нерабочей зарядке ветка летела каждую итерацию туда, где монстра уже нет; (4) кнопка «Проверить объекты фарма» печатает «монстр N стд от окна» — диагностика реакции на место спавна; Noclip уже есть: вкладка «Игрок» → Noclip (+ бинд), стартует выкл | v4.58: (п.27/п.103) Рендер-циклы: тела кадров вынесены в G.RM_MutStep/G.RM_EspStep (без новых local — лимит 200), КАЖДАЯ запись теперь в своём pcall с логом раз за прогон — битая запись больше не роняет весь кадр и не замораживает метки ниже по обратному обходу (раньше в логе было лишь «кадр» без указания записи); п.30 (стейт-цикл) без правки — вред косметичен: e.state or \"\" в метке + ретрай каждую секунду | v4.57: (п.49) Выпадашка «Что забирать» — после Refresh выбор возвращается из G.RM_PickList (раньше выделение сбрасывалось молча и Auto pickup переставал собирать), пустой выбор при включении тогла — уведомление (opt={} проходит через `opt or {\"Все\"}` — пустая таблица truthy, pickSelected=false на каждом цикле без единого действия) | v4.56: (п.91) провод без ClickWire И без ClickDetector — теперь один лог за прогон (раньше молча тикали кулдауны, G.RM_WireNoPath); (п.152) Auto Scare: Config/Wandering ждётся до 2с через WaitForChild — раньше одно чтение при ChildAdded: cfg=nil при опоздавшей репликации → ложное «Ларри снаружи» и пропущенная флешка без повтора | v4.55: Ночь 2 — (п.63) слот вставки ищет «Detector» рекурсивно внутри генератора (вложенный не прямой ребёнок промахивался — слот уходил в запасной pick(false) на любой ClickDetector рядом); (п.64) свободная капсула выбирается БЛИЖАЙШЕЙ к игроку (раньше первый матч в порядке обхода — при двух свободных летели к дальней; неизвестная позиция = ∞ как в v4.52, позиции HRP нет — первый как раньше); п.66 (cellGrabAt безусловно) — без правки: 15с это окно серверной доставки, а не наш кулдаун | v4.54: (п.179) Тревога кабины — если RemoteEvent OpenDoor не найден за 10с ожидания, флаг и тогл ОТКАТЫВАЮТСЯ (раньше висел ON без подписки — «включено, но молчит», объект тогла в G.RM_CabinToggle); (п.28) оба рендера (мутанты и ESP) ищут корень рекурсивно с fallback на RootPart — тот же набор, что у целимости/под-земли: вложенный риг (BunkerRat) или монстр с корнем RootPart получал метку и дистанцию, хотя аимбот его уже видел | v4.53: Цвета темы — resync теперь 3 попытки (+5/+8/+12с вместо одного раза на +5с: поздняя загрузка конфига больше не пропускается, Rayfield.Flags не готовы — с предупреждением), каждый колбэк в своём pcall (лог раз за прогон вместо одного pcall на весь цикл — ошибка первого больше не гасит остальные), градиент шапки перекрашивается ПОСЛЕ цикла колбэков (п.203: раньше из гоночного task.delay акцента при pairs-порядке «акцент не последний» accMine ~= themeToken и градиент навсегда оставался дефолтным); п.222 (литерал RM_Theme) — без правки: все читатели ходят через getgenv() свежим, живых ссылок на старую таблицу после re-run нет | v4.52: (п.93) ключ WrenchGiver — после 3 заходов без результата бэкофф ~50с (раньше рейс каждые 4с ВЕЧНО = TP пинг-понг у ящика, риск Error 267; счётчик G.RM_WrenchTries сбрасывается при находке ключа и включении тогла); (п.62) выбор ближайшего генератора: неизвестная позиция = ∞ вместо 0 — кандидат без позиции больше не побеждает навсегда и не уводит полёт к первому попавшемуся | v4.51: Под землю — (п.142) проверка всплытия перенесена ПЕРЕД блоком камеры с return: раньше исключение на cam.CameraType/CFrame в том же pcall обрубало кадр до underFinish — при упавшей камере погружение оставалось вечным; (п.143) underNearest не учитывает мёртвых (труп рядом держал персонажа под землёй без нужды, модели без Humanoid пропускают проверку — как в аимботе v4.49) | v4.50: Авто-электрика — elecTP возвращает «долетели» (false при сорванном твине: паника/респавн), все три вызова (ящик/ключ/провод) не щёлкают сервер с чужой позиции: fuseOpened не засчитывается при провале рейса, попытки провода крутятся по обычному кулдауну и до ресита/бэкоффа доезжают только после серии провалов; elecClickBox при отсутствии ClickDetector ящика пишет в консоль один раз за прогон (false раньше терялся у вызывающих); тоглы Auto fuel/Auto electric проверяют fireclickdetector ДО установки флага и откатывают переключатель (раньше висел ON без возможности что-то нажать; объект тогла — в G.RM_ElecToggle из-за лимита 200 локальных) | v4.49: BUGHUNT v4.26 — открытые HIGH: кнопки гридов бункера получают локальную копию слота цикла (замыкание на общий for-слот могло дать всем последний номер), бенд RMAimMonster проверяет RUN_ID (чужой прогон не водит камеру), аимбот не целится в мёртвых (труп без удаления вёл прицел в землю), addMutant — inCache и Parent после создания (паттерн espAdd: ошибка посреди создания не оставляет «отмеченного, но невидимого» мутанта навсегда), LP.CharacterAdded под pcall (nil-LocalPlayer не рвал чанк до флагов/Anti-Kick/GUI); снимки света/тумана/камеры привязаны к плейсу как RM_TP_Origin (после телепорта не восстанавливаем чужие ClockTime/FogEnd/зум, легаси-снимки считаются текущими); README: путь конфига собран из FolderName/FileName без выдумки workspace/, в структуру добавлен NOTES_RM.md; NOTES: BunkerRat устарело «в ESP не заведено» — светится с патчем isMutantModel | v4.48: Волна 3 — сверка всех 14 while true на RUN_ID-guard пройдена (все подтверждены; 4943 — ограниченный строковый поиск, не цикл планировщика); слияние двух полных обходов workspace в один: мутанты добавляются на обходе scanEsp вместо отдельного сканера-дублёра (два GetDescendants подряд раз в секунду были одной задачей), погоня/state-цикл и события спавна на месте, modelKind мутантов исключает — двойного ESP нет | v4.47: Rayfield — бинд RMAimMonster снимается при ранних выходах ПО ТОКЕНУ (G.RM_AimBoundAt): и в ветке «Rayfield не загрузился», и в re-run гварде после CreateWindow — раньше слепой снос мог убить уже перевесивший бинд нового прогона, а CreateWindow-выход вообще оставлял свой RenderStep висеть; keybindSanitize пишет ошибку один раз за прогон (раньше молча — санити «просто не срабатывал»); findEliteGui в восьмисекундном стороже троттлинг до 1раз/с (двойной проход по CoreGui каждые 0.2с = микрофризы) | v4.46: ESP система — оба кадровых pcall (мутант-ESP и игроки/предметы) пишут ошибку один раз за прогон (раньше глушились молча — ESP «просто переставало работать»); scanItems() больше не идёт безусловно каждую секунду — только при включённых Item ESP/Auto pickup (+событийный рескан), первый скан всегда наполняет выпадашку, ON-тоглы добивают актуальные предметы; espAdd атомарен — Parent после регистрации в espCache/espBy (ошибка посреди создания оставляла полуфабрикат в container навсегда — espRemove его не видел) | v4.45: Режимы/атмосфера — Temperature-restore не сдаётся после 20 попыток (быстро 10с, дальше раз в 2с пока RUN_ID жив: медленный респавн оставлял LocalScript выключенным навсегда при тогле OFF); G.RM_WriteVal — запись ValueBase с read-back для стамины/Temperature/Freeze/Breath (IntConstrainedValue молча клампит недостижимую цель — запись КАЖДЫЙ тик = десинк/кик Error 267; стамина adopt'ит фактический предел в max); Infinite O2 OFF и re-run возвращают Blur/HeavyBreath (флаги RM_InfO2BlurWas/HbLoopWas + G.RM_InfO2Restore в стартовом блоке 2e — раньше гасили чужое и не возвращали) | v4.44: Ночь 1 — fireThrottle штампует ПОСЛЕ преусловий (Заправить сейчас: pickupBusy до штампа; камин: персонаж+дровяная кучка; радио: все 4 проверки — раньше неудачный проход жёг 2с кулдауна и честный повтор откатывался «Подожди пару секунд»); «Бесплатные апгрейды»: ошибка pcall пишется в консоль и notify (раньше молча глушилась и врал «не найдено»); Auto Scare: при включении сканирует уже существующего Mutant (тогл посреди волны раньше не видел его до следующего спавна) — общий обработчик onMutant для ChildAdded и первого скана | v4.43: Auto Farm / Kid Detector — шаг цикла фарма обёрнут в pcall (одна упавшая итерация — незащищённые GetPivot в hfKidAtDoor/hfDoorWho — убивала ВЕСЬ цикл: фарм «просто переставал работать» до повторного тогла; ошибка пишется один раз за прогон), hfMenuBtns проверяет видимость ВСЕХ предков (скрытый фрейм/выключенный ScreenGui/чужой хаб в PlayerGui — его «Ignore»/«Open» хватались раньше), «kid» ищется с границами слова (Kidnap/skid не берутся — Kid Detector и дверь фарма), кулдаун детектора 30с на имя (стриминг: исчез/появился за тик спамил консоль и уведомления каждую секунду), хелпер G.RM_KidName в getgenv (лимит 200 локальных чанка) | v4.42: Main/Игрок — камера под-земли возвращается в СТАРТОВОМ блоке (раньше блок восстановления стоял после CreateWindow ~6с yield'ов, а при неудачной загрузке Rayfield файл вообще делал ранний return — камера оставалась Scriptable навсегда); подписка мыши под-земли underM1 публикуется в getgenv и гасится при re-run (колбэк глушен RUN_ID, но соединение жило вечно — утечка на каждый перезапуск); Noclip: кеш noclipSaved выкидывает записи о частях, которых больше нет (при включённом Noclip через респавн/смену раунда копились мёртвые части — рост памяти); кадр под-земли: ошибка pcall печатается один раз за прогон (раньше глушилась молча — фича просто «переставала работать» без строки в консоли) | v4.41: ТП/паника — panicTP не «воскрешает» сброшенный флаг pickupBusy (автофича могла финишировать за время ТП паники — слепое hadBusy=true навсегда оставляло мьютекс занятым и все фичи вставали до перезапуска); кнопки ТП: проверка живого персонажа (телепорт трупа врал об успехе) + уважение мьютекса (раньше игнорировали pickupBusy — возврат автозабора откатывал ручной ТП обратно к предмету) + notify при неудаче; чистка вентиляции: gate окна паники, проверка здоровья, результат исходного ТП (клики не начинаются если не долетели), возврат с retOk (точка снимается только при удачном возврате) и честный notify | v4.40: автозабор/авто-заправка — fireItem шлёт ОДИН тип взаимодействия за проход (prompt предпочтительнее) и fired только при успехе pcall (раньше уходили ОБА remote и fired=true даже при упавшем pcall — до ~2 fire-вызовов/с); лимит попыток залипшей цели: после 3 заходов кулдаун минута вместо вечных +10с (ТП туда-обратно весь раунд); isElectric дописаны electr/ключ/Ключ (ящик/ключ в других написаниях автозабор щёлкал — гонка с Auto electric); jerrycan исключён из автозабора (канистру ведёт Auto fuel сам, клик сбивал held/tookRecently); findByModelName: ближайший к игроку кандидат, деко-дубли (модель внутри такой же) — только фолбэком (раньше первая попавшаяся: заправка летела к деко-генератору на другом конце карты, fuelLevel снимал уровень не с того генератора); авто-заправка (цикл и ручная) пишет G.RM_TP_Origin и снимает только при удачном возврате; убран двойной скан ESP на старте (4 обхода workspace подряд) | v4.39: автоэлектрика — round-robin по битым проводам (раньше всегда брался broken[1]: «нечинящийся» первый провод лишал помощи все остальные), бэкофф после 3 неудачных пересадок ящика подряд (раньше рейс к ящику ↔ пересадка крутись ВЕЧНО каждые ~10с — TP пинг-понг), все три рейса электрики (ящик/ключ/провод) пишут G.RM_TP_Origin и снимают её только при удачном возврате — при re-run посреди полёта новый прогон откатывал персонажа (раньше электрика не писала точку возврата вообще), FireServer в ClickWire при падении фолбэчит на ClickDetector (раньше падение гасило клик молча и попытка сгорала); лимит 200 локальных чанка: tLib → G.RM_LibLoadedAt, guiIsOurs внутрь findEliteGui | v4.38: батчи 7a–7b (Rayfield-зона + старт + ESP/Settings) — re-run во время CreateWindow/CreateTab (~6.5с yield'ов) теперь обрывается guard'ом и стабом-вкладкой (раньше строительство шло на уничтоженном окне: сиротские вкладки и InputBegan-бинды, которые Destroy уже никогда не отключал — двойные срабатывания каждого бинда); санити биндов: проход от загрузки библиотеки (tLib+4.3с) и сразу после сборки вкладок + валидация через Enum.KeyCode вместо белого списка (мусор из правленого конфига: пустая строка/«q»/«RIGHTSHIFT» ловился только поздними проходами); findEliteGui и свип старых окон — по заголовку «ELITE HUB» (чужой Rayfield-хаб в CoreGui больше не мутируется и не сносится, своё окно нашлось по подписи); ссылка на старую библиотеку гасится только при успешном Destroy; подписка спавна Anti-Kick публикуется в getgenv и гасится при re-run (раньше висела до следующего CharacterAdded); двойной подъём из-под земли: блок 2b сбрасывает RM_UnderActive и восстанавливает камеру после своего подъёма (фолбэк через ~5с поднимал ЕЩЁ РАЗ из новой точки — на крышу); «Сбросить тему» сбрасывает и сами пикеры (Flags[].Color) — иначе LoadConfiguration/+5с colorResync возвращали кастом при следующем старте; Анти-лаг: pcall на каждый объект (единичная ошибка не рвала весь проход), Terrain пропускается (писал мусор в deprecated-свойства), атрибуты RM_Pot* чистятся только при успешной записи — иначе исходный материал терялся навсегда; пин фона в changeThemeNow при R==1 (сигнал не срабатывал — элементы оставались старой темой) | v4.37: кулдауны fireThrottle переехали в getgenv (локальная таблица умирала при re-run: первый выстрел после перезапуска мгновенно = Error 267) + тихий режим для автомата (радио/флешка/поездки фарма больше не сыплют «Подожди пару секунд» на каждой пропущенной попытке); fuelPress: проверка fireclickdetector ПЕРЕД ТП (без кликера каждый тик уводил персонажа к цели — вечный пинг-понг, который не останавливал ни один стоп-бюджет); ручная заправка штампует lastFuelAt в конце (авто не кликало генератор через 0.7с после ручного); Ночь 2 PowerCell: сброс cellTries ПЕРЕД печатью стопа (счётчик от прошлой ночи давал ложный «авто остановлено»), бюджет попыток жжётся за ЛЮБУЮ попытку вставки (раньше только «в руках+клик» — если капсула не попадает в персонес, цикл канистра↔генератор был бесконечен), первая вставка не раньше 2с после взятия; Тревога двери: кулдаун с -1e9 вместо 0 (первые ~15с os.clock() тревога молчала); Тревога кабины: кулдаун 5с (шла пачками в лобби) + фильтр своего входа по Name/UserId; автозабор: «Что забирать: Все» не работал вовсе — string.lower в Luau не трогает кириллицу, «Все» не совпадало с «все»; точка возврата doPickup пишется ДО твина и снимается только при удачном возврате; Enabled=false/радиус 0 = без ТП к «мёртвой» точке; кнопки Revive/Дюп ждут окончания автодействий (респавн посреди ТП ломал всё); hfMenuBtns сверяет и сырой текст («Открыть» с заглавной не матчилось :lower()); smoothTP: nil-гард первым (гард в конце был мёртвым кодом) | v4.36: ночной баг-хант (15 агентов по зонам, батчи 1–4) — откат RM_TP_Origin оживлён (type→typeof: type(CFrame)=userdata, условие было истинно всегда) и снимается ТОЛЬКО при удачном возврате (камин/радио); TP walk: нормировка диагонали W+D (√2 скорости), CFrame пишется только при отличии позиции; стамина: после 1.2с обнаружения проверяется и G.RM_StaminaLock (тогл выключили — не пишем в чужое); Ночь 1: радио кликает через fireThrottle (было до 24 кликов по 0.5с мимо лимитера = Error 267), авто-флешка под ОБЩИМ лимитером с ручной кнопкой, у Blizzard вылечена and/or-ловушка («как было» ВКЛЮЧАЛО метель при кэше false) и кэш не выбрасывается когда Blizzard не найден, кнопка «Подбросить дрова» под fireThrottle, ТП к дровам/радио проверяется (ложные «Дрова подброшены»/«Цели запущены» без ТП убраны); паника: notify при перезарядке (раньше молча глотала), кулдаун жжётся после проверки персонажа (труп не сжигал), окно паники снимается при неудачном ТП и при «укрытий не нашёл» (раньше 15с автофич были мертвы), рекурсивный фолбэк поиска укрытий; ESP: boolVal при NumberValue не перекрывал атрибут («ДОГОНЯЕТ/ИЩЕТ» мог не детектиться), modelKind фильтрует модели вне workspace (фантомы в espCache кормили аимбот); Auto Farm: panicIdle в цикле и hfTrip (фарм не вытаскивает из укрытия), hfTrip жёсткий — ТП под проверкой, лимитер клика ДОЖИДАЕТСЯ (промах = false, не ложный true), guard выключения/re-run посреди поездки, общий pickupBusy (автозабор не влезет в поездку), матчер меню понимает «не замечать» (раньше только «не замечен» — RU-ветка никогда не срабатывала), кэш окон не замораживается на 16 мин после кнопки проверки, notify зарядки троттлен, candyHeld сбрасывается при истечении окна раздачи | v4.35: Auto Farm по уточнённой механике юзера — цепочка конфет FakeCandyBag (мешок) → CandyBowl (миска) одной поездкой с двумя кликами (hfTrip теперь принимает шаги), на стук в дверь смотрим по ESP: ребёнок (GhostChild ≤25 стд от FrontDoor) → добираем конфеты и жмём «Открыть», иначе → «Не замечать» (тексты EN/RU), каждые 5с осмотр двери в консоль (ребёнок/монстр/пусто), раздача через Hitbox только при конфете, кнопка проверки показывает и мешок | v4.34: фикс кика Error 267 на Ночи 3 сразу после запуска — Anti-Kick больше НЕ удаляет Remotes.Kick (Destroy резал дерево; анти-чит Ночи 3 требует его наличие — отсюда 267 и старый Infinite yield WaitForChild(\"Kick\") из v4.24): теперь только getconnections:Disconnect на все OnClientEvent (клиентская кик-логика молчит, ремоут на месте), повтор на спавне сохранён, в консоль пишется число отключённых обработчиков | v4.33: Auto Farm (Хэллоуин, вкладка «Воспоминания»; тогл без флага — OFF на старте): база спереди камина (LivingRoomFurniture/Model/Fireplace, TweenService = общий smoothTP), конфеты CandyBowl.ClickDetector (слоты 1/2/3, хватает ~3 раза → клик-наполнение), меню ребёнка «Open» кликается само (getconnections → фолбэк VIM), раздача через FrontDoor.Hitbox.ClickDetector строго при конфете в руках (флаг + поиск candy), монстр у окна (Window-части ≤12 стд) → F через VirtualInputManager, батарея <40/130 → зарядка BatteryCrate; кнопка «Проверить объекты фарма» (✓/✗ пути) | v4.32: «Monster» из Воспоминаний подсвечивается ОДНИМ тоглом Monster ESP (вкладка ESP → Монстры) — один клик = и обычные монстры, и «Monster»; отдельный тогл из «Воспоминаний» убран | v4.31: ESP на монстра «Monster» из Воспоминаний — у модели нет Humanoid (только AnimationController, корень RootPart), раньше modelKind её отбрасывал: новый kind «memmonster» + тогл «ESP монстра (Monster)» во вкладке «Воспоминания» (цвет общий с Monster ESP), подпись «имя [дистанция]» без HP, RootPart-фолбэк позиции; камерный аим и «Под землю при опасности» теперь замечают и этого монстра (consider + RootPart) | v4.30: порт полезного из чужих скриптов (скан 14 репозиториев): «Запустить цели (радио)» — ТП к радио + клики до GameState.Active с возвратом на место (prolover), «Отключить метель» — GameState.Blizzard локально с откатом при re-run (prolover), «Бесплатные апгрейды (эксп.)» — RS.Upgrades.Generator Max/Price + показ UpgradeShop/Gambler, честный notify что сервер может не доверять клиенту (diddy), «Тревога двери» — опрос Growling на FrontDoor.SoundPart, кулдаун уведомлений 15с (gueston), «Анти-лаг (Potato)» — Plastic + ноль отражений + декали/текстуры + вода, кэш исходных значений в атрибутах RM_Pot*, восстановление при re-run и на OFF (prolover), WorkerHead (Ночь 3) в Item ESP — предмет без ClickDetector, гейт автозабора e.prompt or e.cd его не трогает (gueston), ТП «Сейфзона (воздух)» y=30 (gueston) | v4.29: убрана проверка на Residence Massacre (GameId/PlaceIds) — меню и скрипт открываются в ЛЮБОЙ игре (игровые фичи молчат, ТП-гейты от улета в пустоту защищают) | ФИКСЫ v4.28 (баг-хант 20 зон, 233 находки, отчёт BUGHUNT_v4.26.md): Под землю — кэш коллизий публикуется в getgenv (re-run возвращает коллизии + поднимает на поверхность), ручной OFF поднимает с глубины, Noclip↔Под-землю читают чужие кэши | автоэлектрика — состояние ящика = намерение клика, а не слепой toggle (flip-flop «шаг 2/шаг 3» убран), пересадка ящика одним рейсом | Паника-ТП — кулдаун 4с, труп не телепортируется, окно паники 15с (автофичи не стартуют, возвраты не откатывают из укрытия, мьютекс на время полёта), ТП-кнопки с force | smoothTP — новый твин отменяет предыдущий (два твина больше не дрались за CFrame) + таймаут ожидания (уничтоженный HRP больше не вешает поток) | «Заправить сейчас» через лимитер (анти-Error 267) | серия дюпа — лимитер на КАЖДОМ шаге, Revive блок при серии | hold-бинд аимбота — guard от зомби-цикла после re-run | Repair/Delivery — общий кулдаун на ремоут (8 кнопок не рвут соединение) | v4.27: сентинел пустого бинда Unknown → ButtonX — Roblox отдаёт input.KeyCode = Enum.KeyCode.Unknown на клики мыши/колесо/тап (DevForum 4073073; фильтр RF 3277) → v4.26 запускал ВСЕ 10 биндов на каждый клик; свип витрины только по TextBox «KeybindBox», санити старого конфига — 3 прохода (4.6/5.6/7.6с) против гонки с LoadConfiguration | v4.26: бинды «None» (под капотом тогда был Unknown — ошибки ввода убраны), автосанити + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
+print("[RESIDENCE MASSACRE] v4.66 rayfield loaded | v4.66: «Духовный помощник» — НОВАЯ карта, вся группа фич, секция первой в «Воспоминаниях» («мишку и часы наверху»): (1) авто-фарм — обходит Teddy bear / Teddy bear2 / часы (автопоиск Clock/Часы/Будильник) / Radio / Lamp, встаёт РЯДОМ (луч→пол→smoothTP) и кликает с интервалом слайдера 0.5–5с; (2) «Теди со мной» — теперь за ОБИМИ мишками; (3) «Спасение: тревога прогресса + прятка в кровати» — рост Progress у входов (Monster/Window/Progress и т.д.) = «монстр ломится», после роста + порог (0.8 масштаб 0..1 / 80 масштаб 0..100) = ловушка опасности → сам телепорт к Bed/Detectors/Detector1 (force) + клик, выход по СБРОСУ Progress ремоутом Unhide (фолбэк — клик детектора), посреди атаки не выкидывает; (4) кнопка «Спрятаться/Выйти (кровать)» вручную; (5) «Рассудок 100%» — Humanoid.Sanity = 100 (сервер может перезаписывать, пробуем); fireThrottle получил minGap (слайдер интервала); блок 2g: OFF всех тоглов + возврат обоих мишек | v4.65: Секция с Теди переименована в «Духовный помощник» — так это воспоминание называется в игре (тогл «Теди со мной (следовать + авто-клик)» и логика без изменений) | v4.64: «Теди-медведь» во вкладке «Воспоминания» — тогл «Теди со мной (следовать + авто-клик)»: модель Teddy bear телепортируется к персонажу каждые 0.3с (2 стда поперёд, локально, исходная точка в G.RM_TeddyCF — возврат при выключении и на старте, блок 2g) и её ClickDetector жмётся сам через общий fireThrottle (кулдаун 2с = анти-Error 267); старт выкл | v4.63: Auto Farm УДАЛЁН из «Воспоминаний» целиком по запросу юзера — тогл «Auto Farm (камин/конфеты/дверь/фонарь)», кнопка «Проверить объекты фарма» и весь цикл (~780 строк: поездки hfTrip, меню стука, раздача конфет, окно → F, зарядка батареи, все hf*-функции и G.RM_Hf*-токены). Во вкладке «Воспоминания» остались: Тревога кабины, Тревога двери, Kid Detector; лимит локальных luac снова свободен | v4.62: Тогл «Левитация (в воздухе, не падаю)» во вкладке Игрок — (1) Freefall выключен: персонаж не уходит в падение и не обвисает в «регдолл»-позу, стоит в воздухе; (2) пола под ногами нет (>8 стд) — гасим вертикаль (гравитация кадра = dt) стоим/идём в воздухе, горизонт не трогаем (TP walk работает); прыжки с земли не задеты (пол в 8 стд), труп при смерти отдаём игре; старт выкл, при выключении/re-run Freefall возвращается (блок 2f) | v4.61: (1) Двери: скрипт собирает ВСЕ модели с «door» в имени карты — посетителя (ребёнок/монстр) ищем у любой двери (юзер показал Hitbox в RightDoor — раньше смотрели только FrontDoor и писали «пусто»); раздача конфеты едет к хитбоксу той двери, где видели ребёнка (G.RM_HfGrantBox), клик по ClickDetector — рекурсивно. (2) Перед «Открыть» обязательна конфета: если взятие сорвалось — не жмём (раньше код всё равно жал «Открыть»), повтор взятия не чаще раза в 6с. (3) Окно: F жмётся ВСЕГДА — севшая батарея больше не блокирует пугание монстра («скрипт пропустил монстра»), зарядка отдельным шагом с кулдауном 20с. (4) Диагностика: осмотр двери пишет состояние меню; раз за стук — имена моделей у двери, если посетитель не распознан; кнопка «Проверить объекты фарма» показывает список всех дверей | v4.60: (1) Крыша устранена: луч пола стартовал с +40 стд над точкой — в доме с потолком начало было НАД крышей, первое попадание = крыша и точка = крыша+3 («телепортует на крышу»); теперь origin на +2 (повтор +8) — только внутри комнаты, без пола выезд не начинается. (2) Живой монстр: трекер движения — модель на месте спавна стоит неподвижно и НЕ считается монстром (hfAtWindow требует движения за последние 30с: влёт/походка = жив, парковка = молчит). (3) Диагностика: кнопка «Проверить объекты фарма» пишет «двигался N с назад/не двигался» и #Progress из структуры модели | v4.59: Auto Farm — (1) без «регдолла»: пол под точкой обязателен (широкий повтор луча; без пола выезд не начинается вместо посадки в мид-эйр), после каждого ТП — ожидание приземления с посадкой при затяжном падении; (2) выезды и возвраты спокойнее — 180 стд/с вместо общих 500 («очень быстро двигаюсь»); (3) анти-пинг-понг: выезд на зарядку батареи не чаще раза в 20с — раньше при нерабочей зарядке ветка летела каждую итерацию туда, где монстра уже нет; (4) кнопка «Проверить объекты фарма» печатает «монстр N стд от окна» — диагностика реакции на место спавна; Noclip уже есть: вкладка «Игрок» → Noclip (+ бинд), стартует выкл | v4.58: (п.27/п.103) Рендер-циклы: тела кадров вынесены в G.RM_MutStep/G.RM_EspStep (без новых local — лимит 200), КАЖДАЯ запись теперь в своём pcall с логом раз за прогон — битая запись больше не роняет весь кадр и не замораживает метки ниже по обратному обходу (раньше в логе было лишь «кадр» без указания записи); п.30 (стейт-цикл) без правки — вред косметичен: e.state or \"\" в метке + ретрай каждую секунду | v4.57: (п.49) Выпадашка «Что забирать» — после Refresh выбор возвращается из G.RM_PickList (раньше выделение сбрасывалось молча и Auto pickup переставал собирать), пустой выбор при включении тогла — уведомление (opt={} проходит через `opt or {\"Все\"}` — пустая таблица truthy, pickSelected=false на каждом цикле без единого действия) | v4.56: (п.91) провод без ClickWire И без ClickDetector — теперь один лог за прогон (раньше молча тикали кулдауны, G.RM_WireNoPath); (п.152) Auto Scare: Config/Wandering ждётся до 2с через WaitForChild — раньше одно чтение при ChildAdded: cfg=nil при опоздавшей репликации → ложное «Ларри снаружи» и пропущенная флешка без повтора | v4.55: Ночь 2 — (п.63) слот вставки ищет «Detector» рекурсивно внутри генератора (вложенный не прямой ребёнок промахивался — слот уходил в запасной pick(false) на любой ClickDetector рядом); (п.64) свободная капсула выбирается БЛИЖАЙШЕЙ к игроку (раньше первый матч в порядке обхода — при двух свободных летели к дальней; неизвестная позиция = ∞ как в v4.52, позиции HRP нет — первый как раньше); п.66 (cellGrabAt безусловно) — без правки: 15с это окно серверной доставки, а не наш кулдаун | v4.54: (п.179) Тревога кабины — если RemoteEvent OpenDoor не найден за 10с ожидания, флаг и тогл ОТКАТЫВАЮТСЯ (раньше висел ON без подписки — «включено, но молчит», объект тогла в G.RM_CabinToggle); (п.28) оба рендера (мутанты и ESP) ищут корень рекурсивно с fallback на RootPart — тот же набор, что у целимости/под-земли: вложенный риг (BunkerRat) или монстр с корнем RootPart получал метку и дистанцию, хотя аимбот его уже видел | v4.53: Цвета темы — resync теперь 3 попытки (+5/+8/+12с вместо одного раза на +5с: поздняя загрузка конфига больше не пропускается, Rayfield.Flags не готовы — с предупреждением), каждый колбэк в своём pcall (лог раз за прогон вместо одного pcall на весь цикл — ошибка первого больше не гасит остальные), градиент шапки перекрашивается ПОСЛЕ цикла колбэков (п.203: раньше из гоночного task.delay акцента при pairs-порядке «акцент не последний» accMine ~= themeToken и градиент навсегда оставался дефолтным); п.222 (литерал RM_Theme) — без правки: все читатели ходят через getgenv() свежим, живых ссылок на старую таблицу после re-run нет | v4.52: (п.93) ключ WrenchGiver — после 3 заходов без результата бэкофф ~50с (раньше рейс каждые 4с ВЕЧНО = TP пинг-понг у ящика, риск Error 267; счётчик G.RM_WrenchTries сбрасывается при находке ключа и включении тогла); (п.62) выбор ближайшего генератора: неизвестная позиция = ∞ вместо 0 — кандидат без позиции больше не побеждает навсегда и не уводит полёт к первому попавшемуся | v4.51: Под землю — (п.142) проверка всплытия перенесена ПЕРЕД блоком камеры с return: раньше исключение на cam.CameraType/CFrame в том же pcall обрубало кадр до underFinish — при упавшей камере погружение оставалось вечным; (п.143) underNearest не учитывает мёртвых (труп рядом держал персонажа под землёй без нужды, модели без Humanoid пропускают проверку — как в аимботе v4.49) | v4.50: Авто-электрика — elecTP возвращает «долетели» (false при сорванном твине: паника/респавн), все три вызова (ящик/ключ/провод) не щёлкают сервер с чужой позиции: fuseOpened не засчитывается при провале рейса, попытки провода крутятся по обычному кулдауну и до ресита/бэкоффа доезжают только после серии провалов; elecClickBox при отсутствии ClickDetector ящика пишет в консоль один раз за прогон (false раньше терялся у вызывающих); тоглы Auto fuel/Auto electric проверяют fireclickdetector ДО установки флага и откатывают переключатель (раньше висел ON без возможности что-то нажать; объект тогла — в G.RM_ElecToggle из-за лимита 200 локальных) | v4.49: BUGHUNT v4.26 — открытые HIGH: кнопки гридов бункера получают локальную копию слота цикла (замыкание на общий for-слот могло дать всем последний номер), бенд RMAimMonster проверяет RUN_ID (чужой прогон не водит камеру), аимбот не целится в мёртвых (труп без удаления вёл прицел в землю), addMutant — inCache и Parent после создания (паттерн espAdd: ошибка посреди создания не оставляет «отмеченного, но невидимого» мутанта навсегда), LP.CharacterAdded под pcall (nil-LocalPlayer не рвал чанк до флагов/Anti-Kick/GUI); снимки света/тумана/камеры привязаны к плейсу как RM_TP_Origin (после телепорта не восстанавливаем чужие ClockTime/FogEnd/зум, легаси-снимки считаются текущими); README: путь конфига собран из FolderName/FileName без выдумки workspace/, в структуру добавлен NOTES_RM.md; NOTES: BunkerRat устарело «в ESP не заведено» — светится с патчем isMutantModel | v4.48: Волна 3 — сверка всех 14 while true на RUN_ID-guard пройдена (все подтверждены; 4943 — ограниченный строковый поиск, не цикл планировщика); слияние двух полных обходов workspace в один: мутанты добавляются на обходе scanEsp вместо отдельного сканера-дублёра (два GetDescendants подряд раз в секунду были одной задачей), погоня/state-цикл и события спавна на месте, modelKind мутантов исключает — двойного ESP нет | v4.47: Rayfield — бинд RMAimMonster снимается при ранних выходах ПО ТОКЕНУ (G.RM_AimBoundAt): и в ветке «Rayfield не загрузился», и в re-run гварде после CreateWindow — раньше слепой снос мог убить уже перевесивший бинд нового прогона, а CreateWindow-выход вообще оставлял свой RenderStep висеть; keybindSanitize пишет ошибку один раз за прогон (раньше молча — санити «просто не срабатывал»); findEliteGui в восьмисекундном стороже троттлинг до 1раз/с (двойной проход по CoreGui каждые 0.2с = микрофризы) | v4.46: ESP система — оба кадровых pcall (мутант-ESP и игроки/предметы) пишут ошибку один раз за прогон (раньше глушились молча — ESP «просто переставало работать»); scanItems() больше не идёт безусловно каждую секунду — только при включённых Item ESP/Auto pickup (+событийный рескан), первый скан всегда наполняет выпадашку, ON-тоглы добивают актуальные предметы; espAdd атомарен — Parent после регистрации в espCache/espBy (ошибка посреди создания оставляла полуфабрикат в container навсегда — espRemove его не видел) | v4.45: Режимы/атмосфера — Temperature-restore не сдаётся после 20 попыток (быстро 10с, дальше раз в 2с пока RUN_ID жив: медленный респавн оставлял LocalScript выключенным навсегда при тогле OFF); G.RM_WriteVal — запись ValueBase с read-back для стамины/Temperature/Freeze/Breath (IntConstrainedValue молча клампит недостижимую цель — запись КАЖДЫЙ тик = десинк/кик Error 267; стамина adopt'ит фактический предел в max); Infinite O2 OFF и re-run возвращают Blur/HeavyBreath (флаги RM_InfO2BlurWas/HbLoopWas + G.RM_InfO2Restore в стартовом блоке 2e — раньше гасили чужое и не возвращали) | v4.44: Ночь 1 — fireThrottle штампует ПОСЛЕ преусловий (Заправить сейчас: pickupBusy до штампа; камин: персонаж+дровяная кучка; радио: все 4 проверки — раньше неудачный проход жёг 2с кулдауна и честный повтор откатывался «Подожди пару секунд»); «Бесплатные апгрейды»: ошибка pcall пишется в консоль и notify (раньше молча глушилась и врал «не найдено»); Auto Scare: при включении сканирует уже существующего Mutant (тогл посреди волны раньше не видел его до следующего спавна) — общий обработчик onMutant для ChildAdded и первого скана | v4.43: Auto Farm / Kid Detector — шаг цикла фарма обёрнут в pcall (одна упавшая итерация — незащищённые GetPivot в hfKidAtDoor/hfDoorWho — убивала ВЕСЬ цикл: фарм «просто переставал работать» до повторного тогла; ошибка пишется один раз за прогон), hfMenuBtns проверяет видимость ВСЕХ предков (скрытый фрейм/выключенный ScreenGui/чужой хаб в PlayerGui — его «Ignore»/«Open» хватались раньше), «kid» ищется с границами слова (Kidnap/skid не берутся — Kid Detector и дверь фарма), кулдаун детектора 30с на имя (стриминг: исчез/появился за тик спамил консоль и уведомления каждую секунду), хелпер G.RM_KidName в getgenv (лимит 200 локальных чанка) | v4.42: Main/Игрок — камера под-земли возвращается в СТАРТОВОМ блоке (раньше блок восстановления стоял после CreateWindow ~6с yield'ов, а при неудачной загрузке Rayfield файл вообще делал ранний return — камера оставалась Scriptable навсегда); подписка мыши под-земли underM1 публикуется в getgenv и гасится при re-run (колбэк глушен RUN_ID, но соединение жило вечно — утечка на каждый перезапуск); Noclip: кеш noclipSaved выкидывает записи о частях, которых больше нет (при включённом Noclip через респавн/смену раунда копились мёртвые части — рост памяти); кадр под-земли: ошибка pcall печатается один раз за прогон (раньше глушилась молча — фича просто «переставала работать» без строки в консоли) | v4.41: ТП/паника — panicTP не «воскрешает» сброшенный флаг pickupBusy (автофича могла финишировать за время ТП паники — слепое hadBusy=true навсегда оставляло мьютекс занятым и все фичи вставали до перезапуска); кнопки ТП: проверка живого персонажа (телепорт трупа врал об успехе) + уважение мьютекса (раньше игнорировали pickupBusy — возврат автозабора откатывал ручной ТП обратно к предмету) + notify при неудаче; чистка вентиляции: gate окна паники, проверка здоровья, результат исходного ТП (клики не начинаются если не долетели), возврат с retOk (точка снимается только при удачном возврате) и честный notify | v4.40: автозабор/авто-заправка — fireItem шлёт ОДИН тип взаимодействия за проход (prompt предпочтительнее) и fired только при успехе pcall (раньше уходили ОБА remote и fired=true даже при упавшем pcall — до ~2 fire-вызовов/с); лимит попыток залипшей цели: после 3 заходов кулдаун минута вместо вечных +10с (ТП туда-обратно весь раунд); isElectric дописаны electr/ключ/Ключ (ящик/ключ в других написаниях автозабор щёлкал — гонка с Auto electric); jerrycan исключён из автозабора (канистру ведёт Auto fuel сам, клик сбивал held/tookRecently); findByModelName: ближайший к игроку кандидат, деко-дубли (модель внутри такой же) — только фолбэком (раньше первая попавшаяся: заправка летела к деко-генератору на другом конце карты, fuelLevel снимал уровень не с того генератора); авто-заправка (цикл и ручная) пишет G.RM_TP_Origin и снимает только при удачном возврате; убран двойной скан ESP на старте (4 обхода workspace подряд) | v4.39: автоэлектрика — round-robin по битым проводам (раньше всегда брался broken[1]: «нечинящийся» первый провод лишал помощи все остальные), бэкофф после 3 неудачных пересадок ящика подряд (раньше рейс к ящику ↔ пересадка крутись ВЕЧНО каждые ~10с — TP пинг-понг), все три рейса электрики (ящик/ключ/провод) пишут G.RM_TP_Origin и снимают её только при удачном возврате — при re-run посреди полёта новый прогон откатывал персонажа (раньше электрика не писала точку возврата вообще), FireServer в ClickWire при падении фолбэчит на ClickDetector (раньше падение гасило клик молча и попытка сгорала); лимит 200 локальных чанка: tLib → G.RM_LibLoadedAt, guiIsOurs внутрь findEliteGui | v4.38: батчи 7a–7b (Rayfield-зона + старт + ESP/Settings) — re-run во время CreateWindow/CreateTab (~6.5с yield'ов) теперь обрывается guard'ом и стабом-вкладкой (раньше строительство шло на уничтоженном окне: сиротские вкладки и InputBegan-бинды, которые Destroy уже никогда не отключал — двойные срабатывания каждого бинда); санити биндов: проход от загрузки библиотеки (tLib+4.3с) и сразу после сборки вкладок + валидация через Enum.KeyCode вместо белого списка (мусор из правленого конфига: пустая строка/«q»/«RIGHTSHIFT» ловился только поздними проходами); findEliteGui и свип старых окон — по заголовку «ELITE HUB» (чужой Rayfield-хаб в CoreGui больше не мутируется и не сносится, своё окно нашлось по подписи); ссылка на старую библиотеку гасится только при успешном Destroy; подписка спавна Anti-Kick публикуется в getgenv и гасится при re-run (раньше висела до следующего CharacterAdded); двойной подъём из-под земли: блок 2b сбрасывает RM_UnderActive и восстанавливает камеру после своего подъёма (фолбэк через ~5с поднимал ЕЩЁ РАЗ из новой точки — на крышу); «Сбросить тему» сбрасывает и сами пикеры (Flags[].Color) — иначе LoadConfiguration/+5с colorResync возвращали кастом при следующем старте; Анти-лаг: pcall на каждый объект (единичная ошибка не рвала весь проход), Terrain пропускается (писал мусор в deprecated-свойства), атрибуты RM_Pot* чистятся только при успешной записи — иначе исходный материал терялся навсегда; пин фона в changeThemeNow при R==1 (сигнал не срабатывал — элементы оставались старой темой) | v4.37: кулдауны fireThrottle переехали в getgenv (локальная таблица умирала при re-run: первый выстрел после перезапуска мгновенно = Error 267) + тихий режим для автомата (радио/флешка/поездки фарма больше не сыплют «Подожди пару секунд» на каждой пропущенной попытке); fuelPress: проверка fireclickdetector ПЕРЕД ТП (без кликера каждый тик уводил персонажа к цели — вечный пинг-понг, который не останавливал ни один стоп-бюджет); ручная заправка штампует lastFuelAt в конце (авто не кликало генератор через 0.7с после ручного); Ночь 2 PowerCell: сброс cellTries ПЕРЕД печатью стопа (счётчик от прошлой ночи давал ложный «авто остановлено»), бюджет попыток жжётся за ЛЮБУЮ попытку вставки (раньше только «в руках+клик» — если капсула не попадает в персонес, цикл канистра↔генератор был бесконечен), первая вставка не раньше 2с после взятия; Тревога двери: кулдаун с -1e9 вместо 0 (первые ~15с os.clock() тревога молчала); Тревога кабины: кулдаун 5с (шла пачками в лобби) + фильтр своего входа по Name/UserId; автозабор: «Что забирать: Все» не работал вовсе — string.lower в Luau не трогает кириллицу, «Все» не совпадало с «все»; точка возврата doPickup пишется ДО твина и снимается только при удачном возврате; Enabled=false/радиус 0 = без ТП к «мёртвой» точке; кнопки Revive/Дюп ждут окончания автодействий (респавн посреди ТП ломал всё); hfMenuBtns сверяет и сырой текст («Открыть» с заглавной не матчилось :lower()); smoothTP: nil-гард первым (гард в конце был мёртвым кодом) | v4.36: ночной баг-хант (15 агентов по зонам, батчи 1–4) — откат RM_TP_Origin оживлён (type→typeof: type(CFrame)=userdata, условие было истинно всегда) и снимается ТОЛЬКО при удачном возврате (камин/радио); TP walk: нормировка диагонали W+D (√2 скорости), CFrame пишется только при отличии позиции; стамина: после 1.2с обнаружения проверяется и G.RM_StaminaLock (тогл выключили — не пишем в чужое); Ночь 1: радио кликает через fireThrottle (было до 24 кликов по 0.5с мимо лимитера = Error 267), авто-флешка под ОБЩИМ лимитером с ручной кнопкой, у Blizzard вылечена and/or-ловушка («как было» ВКЛЮЧАЛО метель при кэше false) и кэш не выбрасывается когда Blizzard не найден, кнопка «Подбросить дрова» под fireThrottle, ТП к дровам/радио проверяется (ложные «Дрова подброшены»/«Цели запущены» без ТП убраны); паника: notify при перезарядке (раньше молча глотала), кулдаун жжётся после проверки персонажа (труп не сжигал), окно паники снимается при неудачном ТП и при «укрытий не нашёл» (раньше 15с автофич были мертвы), рекурсивный фолбэк поиска укрытий; ESP: boolVal при NumberValue не перекрывал атрибут («ДОГОНЯЕТ/ИЩЕТ» мог не детектиться), modelKind фильтрует модели вне workspace (фантомы в espCache кормили аимбот); Auto Farm: panicIdle в цикле и hfTrip (фарм не вытаскивает из укрытия), hfTrip жёсткий — ТП под проверкой, лимитер клика ДОЖИДАЕТСЯ (промах = false, не ложный true), guard выключения/re-run посреди поездки, общий pickupBusy (автозабор не влезет в поездку), матчер меню понимает «не замечать» (раньше только «не замечен» — RU-ветка никогда не срабатывала), кэш окон не замораживается на 16 мин после кнопки проверки, notify зарядки троттлен, candyHeld сбрасывается при истечении окна раздачи | v4.35: Auto Farm по уточнённой механике юзера — цепочка конфет FakeCandyBag (мешок) → CandyBowl (миска) одной поездкой с двумя кликами (hfTrip теперь принимает шаги), на стук в дверь смотрим по ESP: ребёнок (GhostChild ≤25 стд от FrontDoor) → добираем конфеты и жмём «Открыть», иначе → «Не замечать» (тексты EN/RU), каждые 5с осмотр двери в консоль (ребёнок/монстр/пусто), раздача через Hitbox только при конфете, кнопка проверки показывает и мешок | v4.34: фикс кика Error 267 на Ночи 3 сразу после запуска — Anti-Kick больше НЕ удаляет Remotes.Kick (Destroy резал дерево; анти-чит Ночи 3 требует его наличие — отсюда 267 и старый Infinite yield WaitForChild(\"Kick\") из v4.24): теперь только getconnections:Disconnect на все OnClientEvent (клиентская кик-логика молчит, ремоут на месте), повтор на спавне сохранён, в консоль пишется число отключённых обработчиков | v4.33: Auto Farm (Хэллоуин, вкладка «Воспоминания»; тогл без флага — OFF на старте): база спереди камина (LivingRoomFurniture/Model/Fireplace, TweenService = общий smoothTP), конфеты CandyBowl.ClickDetector (слоты 1/2/3, хватает ~3 раза → клик-наполнение), меню ребёнка «Open» кликается само (getconnections → фолбэк VIM), раздача через FrontDoor.Hitbox.ClickDetector строго при конфете в руках (флаг + поиск candy), монстр у окна (Window-части ≤12 стд) → F через VirtualInputManager, батарея <40/130 → зарядка BatteryCrate; кнопка «Проверить объекты фарма» (✓/✗ пути) | v4.32: «Monster» из Воспоминаний подсвечивается ОДНИМ тоглом Monster ESP (вкладка ESP → Монстры) — один клик = и обычные монстры, и «Monster»; отдельный тогл из «Воспоминаний» убран | v4.31: ESP на монстра «Monster» из Воспоминаний — у модели нет Humanoid (только AnimationController, корень RootPart), раньше modelKind её отбрасывал: новый kind «memmonster» + тогл «ESP монстра (Monster)» во вкладке «Воспоминания» (цвет общий с Monster ESP), подпись «имя [дистанция]» без HP, RootPart-фолбэк позиции; камерный аим и «Под землю при опасности» теперь замечают и этого монстра (consider + RootPart) | v4.30: порт полезного из чужих скриптов (скан 14 репозиториев): «Запустить цели (радио)» — ТП к радио + клики до GameState.Active с возвратом на место (prolover), «Отключить метель» — GameState.Blizzard локально с откатом при re-run (prolover), «Бесплатные апгрейды (эксп.)» — RS.Upgrades.Generator Max/Price + показ UpgradeShop/Gambler, честный notify что сервер может не доверять клиенту (diddy), «Тревога двери» — опрос Growling на FrontDoor.SoundPart, кулдаун уведомлений 15с (gueston), «Анти-лаг (Potato)» — Plastic + ноль отражений + декали/текстуры + вода, кэш исходных значений в атрибутах RM_Pot*, восстановление при re-run и на OFF (prolover), WorkerHead (Ночь 3) в Item ESP — предмет без ClickDetector, гейт автозабора e.prompt or e.cd его не трогает (gueston), ТП «Сейфзона (воздух)» y=30 (gueston) | v4.29: убрана проверка на Residence Massacre (GameId/PlaceIds) — меню и скрипт открываются в ЛЮБОЙ игре (игровые фичи молчат, ТП-гейты от улета в пустоту защищают) | ФИКСЫ v4.28 (баг-хант 20 зон, 233 находки, отчёт BUGHUNT_v4.26.md): Под землю — кэш коллизий публикуется в getgenv (re-run возвращает коллизии + поднимает на поверхность), ручной OFF поднимает с глубины, Noclip↔Под-землю читают чужие кэши | автоэлектрика — состояние ящика = намерение клика, а не слепой toggle (flip-flop «шаг 2/шаг 3» убран), пересадка ящика одним рейсом | Паника-ТП — кулдаун 4с, труп не телепортируется, окно паники 15с (автофичи не стартуют, возвраты не откатывают из укрытия, мьютекс на время полёта), ТП-кнопки с force | smoothTP — новый твин отменяет предыдущий (два твина больше не дрались за CFrame) + таймаут ожидания (уничтоженный HRP больше не вешает поток) | «Заправить сейчас» через лимитер (анти-Error 267) | серия дюпа — лимитер на КАЖДОМ шаге, Revive блок при серии | hold-бинд аимбота — guard от зомби-цикла после re-run | Repair/Delivery — общий кулдаун на ремоут (8 кнопок не рвут соединение) | v4.27: сентинел пустого бинда Unknown → ButtonX — Roblox отдаёт input.KeyCode = Enum.KeyCode.Unknown на клики мыши/колесо/тап (DevForum 4073073; фильтр RF 3277) → v4.26 запускал ВСЕ 10 биндов на каждый клик; свип витрины только по TextBox «KeybindBox», санити старого конфига — 3 прохода (4.6/5.6/7.6с) против гонки с LoadConfiguration | v4.26: бинды «None» (под капотом тогда был Unknown — ошибки ввода убраны), автосанити + кнопка «Сбросить все бинды» в Settings, Дюп во ВСЕХ ночах (Н1/Н2/Н3) | v4.25: Дюп предметов — слайдер «Повторов дюпа» + кнопка-серия: ×N воскрешений (LoadCharacter) с паузой 2.5с, одиночный дюп — кнопка Revive | HOTFIX (v4.24): ToggleUIKeybind = Enum.KeyCode.RightShift — строка \"RightShift\" падала в assert валидации Rayfield (string.upper даёт RIGHTSHIFT ≠ RightShift), CreateWindow не создавал окно — меню не открывалось c v4.22 | НОВОЕ (v4.23): «Под землю при опасности» вместо God Mode — монстр ближе радиуса (слайдер «Радиус опасности», 100 ст) → персонаж уходит под землю (сервер видит его там — монстр не достаёт), камера и ходьба как обычно (orb-камера над точкой, WASD штатным контроллером), всплытие когда монстр дальше радиуса+30 или тогл OFF | v4.22: Генератор Н2 — вставка капсулы в Generator.Detector.ClickDetector (больше не летит к чужому генератору; выбранный слот пишется в консоль), вкладка «Воспоминания» (Kid Detector + Тревога кабины переехали из Ночи 3), ВСЕ бинды по умолчанию None | Anti-Kick (Destroy Remotes.Kick при старте + на спавне), Бессмертие/God Mode (тогл в «Игрок») | РЕВИЗИЯ (два независимых ревью: аудит биндов/флагов/кадрового кода + строки 2400-конец): ToggleUIKeybind=RightShift — K (Auto PowerCell) больше не прячет окно Rayfield, отмена отложенного LoadConfiguration старой библиотеки при re-run (откат конфига в первые 4с), гонка стартового restore Disable Static, подсказка Static ищет помехи и в CoreGui, дедуп notify «Камера», scareConn/cabinConn гасятся в блоке старта (утечка на re-run), TP walk не двигает персонаж при наборе в чате, 1 RaycastParams на кадр вместо 2, ESP-рендер считает позицию только для включённых категорий, дебаунс рескана предметов 0.5с | v4.21: Anti-Kick + God Mode + ревью 2400-3783 | v4.20: гашение старой Rayfield, гейты ТП, кулдаун FireServer | v4.19: Паника-ТП (G), Kid Detector | ESP | Settings")
