@@ -110,6 +110,12 @@
 - `workspace.FrontDoor` — дочь `Hitbox` → `ClickDetector` = раздача конфеты
   ребёнку; рядом `SoundPart.Growling` (наша «Тревога двери»), `CamPart`,
   `RightDoor`, `RootPart`, `lookAt`
+  - **v4.61 (скрин юзера)**: кликабельный `Hitbox > ClickDetector` живёт и в
+    `RightDoor` — скрипт собирает **все** модели с «door» в имени
+    (`G.RM_HfDoors`): посетителя ищем ≤25 стд от любой двери, запоминаем
+    `G.RM_HfGrantBox` — раздача едет к хитбоксу именно той двери, где видели
+    ребёнка; `hfKidAtDoor` ловит и `child`/`visitor` в имени; раз за стук
+    консоль печатает имена моделей у двери, если посетитель не распознан
 - `workspace.BatteryCrate` — зарядка фонаря: direct `ClickDetector` (+ 4×
   `Battery`, `Center`, `Main`) — кликать стоя рядом
 - **Меню стука** «Open / Unnoticed» — GUI в `PlayerGui`, ищем ОБЕ кнопки
